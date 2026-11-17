@@ -9,7 +9,7 @@
 
 ## 安装
 
-下载 Release 里的 `MiaoXiangLink-v1.0-release.apk` 安装到手机，允许通知权限。
+下载 Release 里的 `MiaoXiangLink-v1.1-release.apk` 安装到手机，允许通知权限。App 内置自动更新，以后有新版本打开时会提示。
 
 ## 快速开始
 

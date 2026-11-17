@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "MiaoXiangLink"
 include(":app")
+include(":updater")

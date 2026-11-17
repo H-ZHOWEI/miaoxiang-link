@@ -14,6 +14,7 @@ import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.updaterkit.UpdaterKit
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -105,6 +106,11 @@ class MainActivity : AppCompatActivity() {
             rowPair.addView(this, lpWeight())
         }
         cardPair.addView(rowPair, lpWrap())
+        Button(this).apply {
+            text = "检查更新"
+            setOnClickListener { UpdaterKit.checkManually(this@MainActivity) }
+            cardPair.addView(this, lpWrap())
+        }
         statusText = TextView(this).apply {
             text = "状态：未连接"
             textSize = 13f
@@ -390,6 +396,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun toast(msg: String) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 每次回到前台自动检查新版本（库内部已防抖，已是最新则完全静默）
+        UpdaterKit.autoCheck(this)
     }
 
     override fun onDestroy() {
