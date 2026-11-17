@@ -4,12 +4,14 @@ import android.Manifest
 import android.app.AlertDialog
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
+import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -22,10 +24,9 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * 喵想联动 - 主界面
- * 与电脑端通过云端信箱双向通信：
- *  - 电脑任务完成 → 这里展示 + 系统通知
- *  - 这里点任务组 → 电脑收到后执行
+ * 喵想联动 - 主界面（v1.2）
+ *  - 三页签：远程执行 / 任务通知 / 设备，通知不再被长脚本列表挤到底部
+ *  - 多台已配对设备可切换，所有收发都走「当前设备」的配对码
  */
 class MainActivity : AppCompatActivity() {
 
@@ -34,13 +35,26 @@ class MainActivity : AppCompatActivity() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var polling = false
 
-    private lateinit var pairEdit: EditText
-    private lateinit var statusText: TextView
+    // 顶部设备条
+    private lateinit var deviceNameText: TextView
+    private lateinit var deviceStatusText: TextView
+
+    // 页面容器
+    private lateinit var pageTask: View
+    private lateinit var pageNotify: View
+    private lateinit var pageDevice: View
+    private lateinit var tabTask: TextView
+    private lateinit var tabNotify: TextView
+    private lateinit var tabDevice: TextView
+
+    // 内容
     private lateinit var taskContainer: LinearLayout
     private lateinit var notifyContainer: LinearLayout
+    private lateinit var deviceContainer: LinearLayout
     private lateinit var notifySwitch: Switch
 
     private var knownGroups = listOf<Group>()
+    private var currentTab = 0
 
     data class Group(val type: String, val name: String, val label: String)
 
@@ -49,74 +63,132 @@ class MainActivity : AppCompatActivity() {
         prefs = Prefs(this)
         askNotificationPermission()
         buildUi()
-        applyPairToUi()
+        switchTab(0)
+        refreshAll()
         startForegroundPolling()
         PollingWorker.schedule(this, prefs.pollMinutes)
     }
 
     // ------------------------------------------------------------------ UI
     private fun buildUi() {
-        val root = ScrollView(this).apply {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#F5F6F8"))
         }
-        val wrap = LinearLayout(this).apply {
+
+        // 顶栏：标题 + 当前设备 + 状态
+        val header = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val pad = (16 * resources.displayMetrics.density).toInt()
-            setPadding(pad, pad, pad, pad)
+            setBackgroundColor(Color.WHITE)
+            val p = (14 * resources.displayMetrics.density).toInt()
+            setPadding(p, p, p, p)
         }
-        root.addView(wrap, LinearLayout.LayoutParams(
+        header.addView(TextView(this).apply {
+            text = "喵想联动"
+            textSize = 20f
+            setTextColor(Color.parseColor("#0078D4"))
+            setTypeface(null, Typeface.BOLD)
+        }, lpWrap(0))
+        deviceNameText = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#333333"))
+            text = "当前设备：${prefs.currentDeviceName}"
+        }
+        header.addView(deviceNameText, lpWrap(2))
+        deviceStatusText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#999999"))
+            text = "状态：检测中…"
+        }
+        header.addView(deviceStatusText, lpWrap(0))
+        root.addView(header, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-        // 标题
-        TextView(this).apply {
-            text = "喵想联动"
-            textSize = 22f
-            setTextColor(Color.parseColor("#0078D4"))
-            gravity = Gravity.CENTER
-            wrap.addView(this, lpWrap())
+        // 页签栏
+        val tabBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.WHITE)
+            val p = (8 * resources.displayMetrics.density).toInt()
+            setPadding(p, p, p, p)
         }
-        TextView(this).apply {
-            text = "电脑任务通知 · 手机远程下发"
-            textSize = 13f
-            setTextColor(Color.parseColor("#888888"))
-            gravity = Gravity.CENTER
-            wrap.addView(this, lpWrap())
+        tabTask = tab("① 远程执行")
+        tabNotify = tab("② 任务通知")
+        tabDevice = tab("③ 设备")
+        tabTask.setOnClickListener { switchTab(0) }
+        tabNotify.setOnClickListener { switchTab(1) }
+        tabDevice.setOnClickListener { switchTab(2) }
+        tabBar.addView(tabTask, lpWeight())
+        tabBar.addView(tabNotify, lpWeight())
+        tabBar.addView(tabDevice, lpWeight())
+        root.addView(tabBar, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // 内容区（占满剩余高度，各页独立滚动，互不挤压）
+        val content = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#F5F6F8"))
         }
 
-        // 配对码卡片
-        val cardPair = card()
-        addSectionTitle(cardPair, "① 配对设置")
-        pairEdit = EditText(this).apply {
-            hint = "输入电脑端显示的配对码"
-            inputType = InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or InputType.TYPE_CLASS_TEXT
-            filters = arrayOf(android.text.InputFilter.AllCaps())
-            textSize = 16f
-            setTextColor(Color.parseColor("#222222"))
+        // ---- 页1：远程执行 ----
+        pageTask = ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#F5F6F8"))
         }
-        cardPair.addView(pairEdit, lpWrap())
-        val rowPair = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        Button(this).apply {
-            text = "保存配对码"
-            setOnClickListener { savePair() }
-            rowPair.addView(this, lpWeight())
+        val taskWrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
         }
-        Button(this).apply {
-            text = "测试连接"
-            setOnClickListener { testConnection() }
-            rowPair.addView(this, lpWeight())
+        val cardTask = card()
+        addSectionTitle(cardTask, "点一下任务组，当前电脑立即执行")
+        taskContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        cardTask.addView(taskContainer, lpWrap())
+        cardTask.addView(Button(this).apply {
+            text = "刷新任务组"
+            setOnClickListener { loadGroups(showToast = true) }
+        }, lpWrap())
+        cardTask.addView(TextView(this).apply {
+            text = "（电脑正在跑其他任务时会忽略本次指令）"
+            textSize = 11f
+            setTextColor(Color.parseColor("#999999"))
+        }, lpWrap())
+        taskWrap.addView(cardTask, lpWrap())
+        (pageTask as ScrollView).addView(taskWrap, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // ---- 页2：任务通知 ----
+        pageNotify = ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#F5F6F8"))
         }
-        cardPair.addView(rowPair, lpWrap())
-        Button(this).apply {
-            text = "检查更新"
-            setOnClickListener { UpdaterKit.checkManually(this@MainActivity) }
-            cardPair.addView(this, lpWrap())
+        val notifyWrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
         }
-        statusText = TextView(this).apply {
-            text = "状态：未连接"
-            textSize = 13f
-            setTextColor(Color.parseColor("#666666"))
+        val cardNotify = card()
+        addSectionTitle(cardNotify, "最近任务通知（当前设备）")
+        notifyContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        cardNotify.addView(notifyContainer, lpWrap())
+        notifyWrap.addView(cardNotify, lpWrap())
+        (pageNotify as ScrollView).addView(notifyWrap, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // ---- 页3：设备 ----
+        pageDevice = ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#F5F6F8"))
         }
-        cardPair.addView(statusText, lpWrap())
+        val deviceWrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+        }
+        val cardDevice = card()
+        addSectionTitle(cardDevice, "已配对的电脑（点卡片切换）")
+        deviceContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        cardDevice.addView(deviceContainer, lpWrap())
+        cardDevice.addView(Button(this).apply {
+            text = "＋ 添加新设备（输入配对码）"
+            setOnClickListener { showAddDeviceDialog() }
+        }, lpWrap())
+        deviceWrap.addView(cardDevice, lpWrap())
+
+        val cardSetting = card()
+        addSectionTitle(cardSetting, "设置")
         notifySwitch = Switch(this).apply {
             text = "后台接收任务通知"
             isChecked = prefs.notifyEnabled
@@ -125,46 +197,68 @@ class MainActivity : AppCompatActivity() {
                 if (on) PollingWorker.schedule(this@MainActivity, prefs.pollMinutes)
             }
         }
-        cardPair.addView(notifySwitch, lpWrap())
-        wrap.addView(cardPair, lpWrap())
-
-        // 任务组卡片
-        val cardTask = card()
-        addSectionTitle(cardTask, "② 远程执行任务组（点一下，电脑就执行）")
-        taskContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        cardTask.addView(taskContainer, lpWrap())
-        Button(this).apply {
-            text = "刷新任务组"
-            setOnClickListener { loadGroups(showToast = true) }
-            cardTask.addView(this, lpWrap())
-        }
-        wrap.addView(cardTask, lpWrap())
-
-        // 通知记录卡片
-        val cardNotify = card()
-        addSectionTitle(cardNotify, "③ 最近任务通知")
-        notifyContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        cardNotify.addView(notifyContainer, lpWrap())
-        wrap.addView(cardNotify, lpWrap())
-
-        TextView(this).apply {
-            text = "提示：电脑端需开启「手机联动」并使用相同配对码。\n本 App 在前台时实时刷新；退到后台约每 ${prefs.pollMinutes} 分钟检查一次通知。"
+        cardSetting.addView(notifySwitch, lpWrap())
+        cardSetting.addView(Button(this).apply {
+            text = "检查更新"
+            setOnClickListener { UpdaterKit.checkManually(this@MainActivity) }
+        }, lpWrap())
+        cardSetting.addView(TextView(this).apply {
+            text = "提示：在每台电脑上各自开启「手机联动」并生成配对码，再逐个添加到这里。\n" +
+                   "在本页点击设备卡片即可切换当前控制的电脑；只有已配对过的设备能切换。\n" +
+                   "App 前台时实时刷新；退到后台约每 ${prefs.pollMinutes} 分钟检查一次通知。"
             textSize = 11f
             setTextColor(Color.parseColor("#999999"))
-            wrap.addView(this, lpWrap())
-        }
+        }, lpWrap())
+        deviceWrap.addView(cardSetting, lpWrap())
+        (pageDevice as ScrollView).addView(deviceWrap, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        content.addView(pageTask, matchParent())
+        content.addView(pageNotify, matchParent())
+        content.addView(pageDevice, matchParent())
+        root.addView(content, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         setContentView(root)
+    }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun tab(text: String) = TextView(this).apply {
+        this.text = text
+        textSize = 14f
+        gravity = Gravity.CENTER
+        setPadding(0, dp(8), 0, dp(8))
+        setBackgroundColor(Color.parseColor("#EEF0F3"))
+        setTextColor(Color.parseColor("#666666"))
+    }
+
+    private fun switchTab(index: Int) {
+        currentTab = index
+        pageTask.visibility = if (index == 0) View.VISIBLE else View.GONE
+        pageNotify.visibility = if (index == 1) View.VISIBLE else View.GONE
+        pageDevice.visibility = if (index == 2) View.VISIBLE else View.GONE
+        styleTab(tabTask, index == 0)
+        styleTab(tabNotify, index == 1)
+        styleTab(tabDevice, index == 2)
+        if (index == 1) refreshNotificationsOnly()
+        if (index == 2) renderDevices()
+    }
+
+    private fun styleTab(t: TextView, active: Boolean) {
+        t.setBackgroundColor(Color.parseColor(if (active) "#0078D4" else "#EEF0F3"))
+        t.setTextColor(Color.parseColor(if (active) "#FFFFFF" else "#666666"))
+        t.setTypeface(null, if (active) Typeface.BOLD else Typeface.NORMAL)
     }
 
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setBackgroundColor(Color.WHITE)
-        val p = (14 * resources.displayMetrics.density).toInt()
+        val p = dp(14)
         setPadding(p, p, p, p)
         val lp = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        lp.bottomMargin = (12 * resources.displayMetrics.density).toInt()
+        lp.bottomMargin = dp(10)
         layoutParams = lp
         elevation = 2f * resources.displayMetrics.density
     }
@@ -174,45 +268,173 @@ class MainActivity : AppCompatActivity() {
             this.text = text
             textSize = 15f
             setTextColor(Color.parseColor("#333333"))
-            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTypeface(null, Typeface.BOLD)
         }, lpWrap())
     }
 
-    private fun lpWrap() = LinearLayout.LayoutParams(
+    private fun lpWrap(top: Int = 8) = LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-        topMargin = (8 * resources.displayMetrics.density).toInt()
+        topMargin = dp(top)
     }
 
     private fun lpWeight() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-        rightMargin = (6 * resources.displayMetrics.density).toInt()
+        rightMargin = dp(4)
+        leftMargin = dp(4)
     }
 
-    // ------------------------------------------------------------------ 配对
-    private fun applyPairToUi() {
-        pairEdit.setText(prefs.pairCode)
-    }
+    private fun matchParent() = FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
 
-    private fun savePair() {
-        val code = pairEdit.text.toString().trim().uppercase()
-        if (code.length < 4) {
-            toast("配对码至少 4 位")
+    // ------------------------------------------------------------------ 设备
+    private fun renderDevices() {
+        deviceNameText.text = "当前设备：${prefs.currentDeviceName}"
+        deviceContainer.removeAllViews()
+        val list = prefs.devices
+        if (list.isEmpty()) {
+            deviceContainer.addView(TextView(this).apply {
+                text = "还没有已配对的设备。点下方「添加新设备」，输入电脑端显示的配对码。"
+                textSize = 12f
+                setTextColor(Color.parseColor("#999999"))
+            }, lpWrap())
             return
         }
-        prefs.pairCode = code
-        prefs.lastSeenId = 0L
-        PollingWorker.schedule(this, prefs.pollMinutes)
-        toast("配对码已保存")
-        refreshAll()
+        for (d in list) {
+            val active = d.code == prefs.currentCode
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setBackgroundColor(Color.parseColor(if (active) "#E8F2FE" else "#FAFAFA"))
+                val p = dp(10)
+                setPadding(p, p, p, p)
+            }
+            val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            info.addView(TextView(this).apply {
+                text = (if (active) "● " else "○ ") + d.name + (if (active) "  （当前）" else "")
+                textSize = 14f
+                setTextColor(Color.parseColor(if (active) "#0078D4" else "#333333"))
+                setTypeface(null, if (active) Typeface.BOLD else Typeface.NORMAL)
+            }, lpWrap(0))
+            info.addView(TextView(this).apply {
+                text = "配对码：${d.code}"
+                textSize = 11f
+                setTextColor(Color.parseColor("#999999"))
+            }, lpWrap(0))
+            row.addView(info, LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+            row.addView(Button(this).apply {
+                text = if (active) "已选中" else "切换"
+                isEnabled = !active
+                textSize = 12f
+                setOnClickListener {
+                    prefs.switchDevice(d.code)
+                    onDeviceChanged()
+                }
+            }, LinearLayout.LayoutParams(dp(64), LinearLayout.LayoutParams.WRAP_CONTENT))
+
+            row.addView(Button(this).apply {
+                text = "改名"
+                textSize = 12f
+                setOnClickListener { showRenameDialog(d) }
+            }, LinearLayout.LayoutParams(dp(60), LinearLayout.LayoutParams.WRAP_CONTENT))
+
+            row.addView(Button(this).apply {
+                text = "删除"
+                textSize = 12f
+                setOnClickListener { confirmRemove(d) }
+            }, LinearLayout.LayoutParams(dp(60), LinearLayout.LayoutParams.WRAP_CONTENT))
+
+            deviceContainer.addView(row, lpWrap(6))
+        }
     }
 
-    private fun testConnection() {
-        val code = pairEdit.text.toString().trim().uppercase()
-        if (code.isEmpty()) { toast("请先填配对码"); return }
-        toast("正在测试…")
-        scope.launch {
-            val ok = withContext(Dispatchers.IO) { CloudApi.ping(code).isSuccess }
-            toast(if (ok) "连接成功，配对码可用" else "连接失败，请检查网络或配对码")
+    private fun onDeviceChanged() {
+        knownGroups = emptyList()
+        deviceNameText.text = "当前设备：${prefs.currentDeviceName}"
+        toast("已切换到：${prefs.currentDeviceName}")
+        refreshAll()
+        renderDevices()
+    }
+
+    private fun showAddDeviceDialog() {
+        val view = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(4))
         }
+        val nameEdit = EditText(this).apply {
+            hint = "设备名称（如：家里电脑）"
+            inputType = InputType.TYPE_CLASS_TEXT
+            textSize = 16f
+        }
+        val codeEdit = EditText(this).apply {
+            hint = "电脑端显示的配对码"
+            inputType = InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or InputType.TYPE_CLASS_TEXT
+            filters = arrayOf(android.text.InputFilter.AllCaps())
+            textSize = 16f
+        }
+        view.addView(nameEdit, lpWrap())
+        view.addView(codeEdit, lpWrap())
+        view.addView(TextView(this).apply {
+            text = "在电脑端点「手机联动 → 生成新配对码」后可看到配对码。"
+            textSize = 11f
+            setTextColor(Color.parseColor("#999999"))
+        }, lpWrap())
+
+        AlertDialog.Builder(this)
+            .setTitle("添加设备")
+            .setView(view)
+            .setPositiveButton("添加并切换") { _, _ ->
+                val code = codeEdit.text.toString().trim()
+                if (code.length < 4) { toast("配对码至少 4 位"); return@setPositiveButton }
+                if (prefs.hasDevice(code)) {
+                    prefs.switchDevice(code)
+                    toast("该设备已存在，已切换到它")
+                    onDeviceChanged()
+                    return@setPositiveButton
+                }
+                prefs.addDevice(code, nameEdit.text.toString())
+                toast("已添加：${prefs.currentDeviceName}")
+                onDeviceChanged()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showRenameDialog(d: Prefs.Device) {
+        val edit = EditText(this).apply {
+            setText(d.name)
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        AlertDialog.Builder(this)
+            .setTitle("重命名设备")
+            .setView(edit)
+            .setPositiveButton("保存") { _, _ ->
+                prefs.renameDevice(d.code, edit.text.toString())
+                renderDevices()
+                deviceNameText.text = "当前设备：${prefs.currentDeviceName}"
+                toast("已重命名")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun confirmRemove(d: Prefs.Device) {
+        AlertDialog.Builder(this)
+            .setTitle("删除设备")
+            .setMessage("删除「${d.name}」？删除后需重新输入配对码才能再次切换回来。")
+            .setPositiveButton("删除") { _, _ ->
+                val wasActive = d.code == prefs.currentCode
+                prefs.removeDevice(d.code)
+                if (wasActive) {
+                    knownGroups = emptyList()
+                    refreshAll()
+                }
+                renderDevices()
+                deviceNameText.text = "当前设备：${prefs.currentDeviceName}"
+                toast("已删除")
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     // ------------------------------------------------------------------ 数据加载
@@ -221,7 +443,7 @@ class MainActivity : AppCompatActivity() {
         polling = true
         handler.post(object : Runnable {
             override fun run() {
-                if (prefs.pairCode.isNotEmpty()) refreshAll()
+                if (prefs.currentCode.isNotEmpty()) refreshAll()
                 handler.postDelayed(this, 4000)
             }
         })
@@ -229,21 +451,26 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshAll() {
         scope.launch {
-            loadGroupsInternal(false)
+            loadGroupsInternal()
             loadNotificationsInternal()
             loadStatusInternal()
+            if (currentTab == 2) renderDevices()
         }
+    }
+
+    private fun refreshNotificationsOnly() {
+        scope.launch { loadNotificationsInternal() }
     }
 
     private fun loadGroups(showToast: Boolean) {
         scope.launch {
-            val ok = loadGroupsInternal(showToast)
-            if (showToast) toast(if (ok) "任务组已刷新" else "刷新失败，请检查连接")
+            val ok = loadGroupsInternal()
+            if (showToast) toast(if (ok) "任务组已刷新（${prefs.currentDeviceName}）" else "刷新失败，请检查连接")
         }
     }
 
-    private suspend fun loadGroupsInternal(showToast: Boolean): Boolean {
-        val pair = prefs.pairCode.trim()
+    private suspend fun loadGroupsInternal(): Boolean {
+        val pair = prefs.currentCode
         if (pair.isEmpty()) return false
         val res = withContext(Dispatchers.IO) { CloudApi.fetchLatest(pair, CloudApi.MSG_GROUP_LIST, 1) }
         val arr = res.getOrElse { return false }
@@ -271,7 +498,7 @@ class MainActivity : AppCompatActivity() {
         taskContainer.removeAllViews()
         if (groups.isEmpty()) {
             taskContainer.addView(TextView(this).apply {
-                text = "暂无任务组。请先在电脑端开启手机联动，或点「刷新任务组」。"
+                text = "当前设备暂无任务组。请确认该电脑已开启手机联动，或点「刷新任务组」。"
                 textSize = 12f
                 setTextColor(Color.parseColor("#999999"))
             }, lpWrap())
@@ -280,31 +507,30 @@ class MainActivity : AppCompatActivity() {
         val order = mapOf("screenshot_group" to 0, "group" to 1, "mixed_group" to 2, "script" to 3)
         val sorted = groups.sortedBy { order[it.type] ?: 9 }
         for (g in sorted) {
-            val btn = Button(this).apply {
+            taskContainer.addView(Button(this).apply {
                 text = "▸  ${g.label}：${g.name}"
                 isAllCaps = false
                 setTextColor(Color.parseColor("#0078D4"))
                 textSize = 13f
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
                 setOnClickListener { confirmRun(g) }
-            }
-            taskContainer.addView(btn, lpWrap())
+            }, lpWrap(4))
         }
     }
 
     private fun confirmRun(g: Group) {
         AlertDialog.Builder(this)
-            .setTitle("远程执行")
-            .setMessage("让电脑立即执行：\n${g.label}「${g.name}」？\n\n（电脑正在跑其他任务时会忽略本次指令）")
+            .setTitle("远程执行 · ${prefs.currentDeviceName}")
+            .setMessage("让「${prefs.currentDeviceName}」立即执行：\n${g.label}「${g.name}」？\n\n（电脑正在跑其他任务时会忽略本次指令）")
             .setPositiveButton("执行") { _, _ -> sendCommand(g) }
             .setNegativeButton("取消", null)
             .show()
     }
 
     private fun sendCommand(g: Group) {
-        val pair = prefs.pairCode.trim()
-        if (pair.isEmpty()) { toast("请先设置配对码"); return }
-        toast("指令已发送")
+        val pair = prefs.currentCode
+        if (pair.isEmpty()) { toast("请先添加设备"); return }
+        toast("指令已发送到：${prefs.currentDeviceName}")
         scope.launch {
             val ok = withContext(Dispatchers.IO) {
                 CloudApi.sendCommand(pair, g.type, g.name).isSuccess
@@ -314,7 +540,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun loadNotificationsInternal() {
-        val pair = prefs.pairCode.trim()
+        val pair = prefs.currentCode
         if (pair.isEmpty()) return
         val res = withContext(Dispatchers.IO) { CloudApi.fetchLatest(pair, CloudApi.MSG_TASK_DONE, 6) }
         val done = res.getOrElse { JSONArray() }
@@ -328,14 +554,14 @@ class MainActivity : AppCompatActivity() {
         notifyContainer.removeAllViews()
         if (combined.isEmpty()) {
             notifyContainer.addView(TextView(this).apply {
-                text = "暂无通知记录"
+                text = "「${prefs.currentDeviceName}」暂无通知记录"
                 textSize = 12f
                 setTextColor(Color.parseColor("#999999"))
             }, lpWrap())
             return
         }
         val sdf = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
-        for (row in combined.take(8)) {
+        for (row in combined.take(12)) {
             val type = row.optString("msg_type", "")
             val icon = if (type == CloudApi.MSG_TASK_FAILED) "✗" else "✓"
             val color = if (type == CloudApi.MSG_TASK_FAILED) "#DC3545" else "#28A745"
@@ -345,28 +571,33 @@ class MainActivity : AppCompatActivity() {
                 val parsed = java.time.OffsetDateTime.parse(raw)
                 time = sdf.format(Date.from(parsed.toInstant()))
             } catch (_: Exception) {}
+            val fullText = "$icon  ${row.optString("title", "")}  ·  $time\n${row.optString("content", "")}"
+            val spanned = android.text.SpannableString(fullText).apply {
+                setSpan(android.text.style.ForegroundColorSpan(Color.parseColor(color)),
+                    0, icon.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
             val line = TextView(this).apply {
-                text = "$icon  ${row.optString("title", "")}  ·  $time\n${row.optString("content", "")}"
+                text = spanned
                 textSize = 12f
                 setTextColor(Color.parseColor("#444444"))
-                setPadding(0, (6 * resources.displayMetrics.density).toInt(), 0,
-                    (6 * resources.displayMetrics.density).toInt())
+                setPadding(0, dp(6), 0, dp(6))
             }
             notifyContainer.addView(line, lpWrap())
         }
     }
 
     private suspend fun loadStatusInternal() {
-        val pair = prefs.pairCode.trim()
+        val pair = prefs.currentCode
         if (pair.isEmpty()) {
-            statusText.text = "状态：未设置配对码"
+            deviceStatusText.text = "状态：请先添加设备"
+            deviceStatusText.setTextColor(Color.parseColor("#DC3545"))
             return
         }
         val res = withContext(Dispatchers.IO) { CloudApi.fetchLatest(pair, CloudApi.MSG_HEARTBEAT, 1) }
         val arr = res.getOrElse { null }
         if (arr == null || arr.length() == 0) {
-            statusText.text = "状态：未发现电脑（请开启电脑端联动）"
-            statusText.setTextColor(Color.parseColor("#DC3545"))
+            deviceStatusText.text = "状态：未发现「${prefs.currentDeviceName}」（请开启该电脑的联动）"
+            deviceStatusText.setTextColor(Color.parseColor("#DC3545"))
             return
         }
         val created = arr.getJSONObject(0).optString("created_at", "")
@@ -375,11 +606,11 @@ class MainActivity : AppCompatActivity() {
             ((System.currentTimeMillis() - t) / 60000).toInt()
         } catch (_: Exception) { 999 }
         if (minutesAgo <= 5) {
-            statusText.text = "状态：● 电脑在线（心跳 $minutesAgo 分钟前）"
-            statusText.setTextColor(Color.parseColor("#28A745"))
+            deviceStatusText.text = "状态：● ${prefs.currentDeviceName} 在线（心跳 $minutesAgo 分钟前）"
+            deviceStatusText.setTextColor(Color.parseColor("#28A745"))
         } else {
-            statusText.text = "状态：○ 电脑可能离线（心跳 $minutesAgo 分钟前）"
-            statusText.setTextColor(Color.parseColor("#999999"))
+            deviceStatusText.text = "状态：○ ${prefs.currentDeviceName} 可能离线（心跳 $minutesAgo 分钟前）"
+            deviceStatusText.setTextColor(Color.parseColor("#999999"))
         }
     }
 
@@ -400,8 +631,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // 每次回到前台自动检查新版本（库内部已防抖，已是最新则完全静默）
         UpdaterKit.autoCheck(this)
+        deviceNameText.text = "当前设备：${prefs.currentDeviceName}"
+        if (currentTab == 2) renderDevices()
     }
 
     override fun onDestroy() {

@@ -13,46 +13,50 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 
 /**
- * 后台定时轮询：拉取电脑端写来的通知，弹系统通知，并标记已读。
- * 由 WorkManager 周期调度（App 退到后台时仍会运行）。
+ * 后台定时轮询：遍历所有「已配对设备」，拉取各自电脑写来的通知，弹系统通知并标记已读。
+ * 每台设备有独立的 lastSeen 游标，切换设备不会互相干扰；通知标题带设备名以区分来源。
  */
 class PollingWorker(appContext: Context, params: WorkerParameters) : Worker(appContext, params) {
 
     override fun doWork(): Result {
         val prefs = Prefs(applicationContext)
-        val pair = prefs.pairCode.trim()
-        if (pair.isEmpty() || !prefs.notifyEnabled) return Result.success()
+        if (!prefs.notifyEnabled) return Result.success()
+        val devices = prefs.devices
+        if (devices.isEmpty()) return Result.success()
 
-        val res = runBlocking { CloudApi.fetchUnread(pair) }
-        val rows = res.getOrElse { return Result.success() }
+        for (device in devices) {
+            val pair = device.code
+            val res = runBlocking { CloudApi.fetchUnread(pair) }
+            if (res.isFailure) continue
+            val rows = res.getOrNull() ?: continue
 
-        var lastId = prefs.lastSeenId
-        for (i in 0 until rows.length()) {
-            val row = rows.optJSONObject(i) ?: continue
-            val id = row.optLong("id", 0L)
-            if (id <= lastId) continue
+            var lastId = prefs.getLastSeen(pair)
+            for (i in 0 until rows.length()) {
+                val row = rows.optJSONObject(i) ?: continue
+                val id = row.optLong("id", 0L)
+                if (id <= lastId) continue
 
-            val type = row.optString("msg_type", "")
-            // 心跳 / 组清单 / 回执 不弹通知，只推进 seen
-            if (type == CloudApi.MSG_HEARTBEAT || type == CloudApi.MSG_GROUP_LIST ||
-                type == CloudApi.MSG_ACK) {
+                val type = row.optString("msg_type", "")
+                // 心跳 / 组清单 / 回执 不弹通知，只推进 seen
+                if (type == CloudApi.MSG_HEARTBEAT || type == CloudApi.MSG_GROUP_LIST ||
+                    type == CloudApi.MSG_ACK) {
+                    lastId = id
+                    CloudApi.markRead(id)
+                    continue
+                }
+                val title = "[${device.name}] ${row.optString("title", "电脑通知")}"
+                val content = row.optString("content", "")
+                Notifier.show(applicationContext, title, content, id.toInt() + pair.hashCode())
                 lastId = id
                 CloudApi.markRead(id)
-                continue
             }
-            val title = row.optString("title", "电脑通知")
-            val content = row.optString("content", "")
-            Notifier.show(applicationContext, title, content, id.toInt())
-            lastId = id
-            CloudApi.markRead(id)
+            if (lastId > prefs.getLastSeen(pair)) prefs.setLastSeen(pair, lastId)
         }
-        if (lastId > prefs.lastSeenId) prefs.lastSeenId = lastId
         return Result.success()
     }
 
     companion object {
         fun schedule(context: Context, minutes: Int) {
-            // 由 MainActivity 调用，使用 PeriodicWorkRequest
             val work = androidx.work.PeriodicWorkRequestBuilder<PollingWorker>(
                 minutes.toLong(), java.util.concurrent.TimeUnit.MINUTES
             ).setConstraints(

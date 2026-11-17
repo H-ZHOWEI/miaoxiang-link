@@ -9,7 +9,7 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
             val prefs = Prefs(context)
-            if (prefs.pairCode.isNotEmpty()) {
+            if (prefs.devices.isNotEmpty()) {
                 PollingWorker.schedule(context, prefs.pollMinutes)
             }
         }
