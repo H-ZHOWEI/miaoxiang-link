@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">喵想联动</string>
+    <!-- 无障碍列表里显示的名字：必须短、含 App 名，否则用户认不出来 -->
+    <string name="accessibility_label">喵想联动 · 自动签到</string>
     <string name="accessibility_desc">喵想联动需要此权限来模拟点击、长按和滑动，实现自动签到。启用后本服务只在你主动执行任务时派发手势，不会监控你的操作或读取屏幕内容。</string>
 </resources>

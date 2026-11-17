@@ -2,11 +2,13 @@ package com.miaoxiang.link
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
+import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -35,27 +37,30 @@ class AutoTaskPanel(
             setPadding(dp(12), dp(12), dp(12), dp(12))
         }
 
-        // ---- 无障碍授权卡 ----
+        // ---- 权限授权卡 ----
         val cardAuth = card()
-        addTitle(cardAuth, "① 开启模拟操作权限")
+        addTitle(cardAuth, "① 开启模拟操作权限（两项都要开）")
         val authStatus = TextView(ctx).apply { textSize = 12f }
         cardAuth.addView(authStatus, lpWrap(6))
-        cardAuth.addView(Button(ctx).apply {
-            text = "前往开启无障碍权限"
+        val btnAccessibility = Button(ctx).apply {
+            text = "1. 开启无障碍（模拟点击/长按/滑动）"
             isAllCaps = false
-            setOnClickListener {
-                try {
-                    ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                } catch (_: Exception) {
-                    toast("打不开设置，请到 系统设置 → 无障碍 里手动开启")
-                }
-            }
-        }, lpWrap(8))
+            setOnClickListener { openAccessibilitySettings() }
+        }
+        cardAuth.addView(btnAccessibility, lpWrap(8))
+        val btnOverlay = Button(ctx).apply {
+            text = "2. 开启悬浮窗（屏幕取点用）"
+            isAllCaps = false
+            setOnClickListener { openOverlaySettings() }
+        }
+        cardAuth.addView(btnOverlay, lpWrap(4))
         cardAuth.addView(TextView(ctx).apply {
-            text = "开启后本 App 才能模拟点击、长按、滑动。系统会在设置里显示“喵想联动”。"
+            text = "无障碍：在无障碍列表里找「喵想联动 · 自动签到」，点开后打开开关。\n" +
+                   "悬浮窗：允许「显示在其他应用上层」，取点时准星才能盖在目标 App 上。\n" +
+                   "两项都是手机系统出于安全考虑要求手动授权的，本 App 不会读取你的屏幕内容。"
             textSize = 11f
-            setTextColor(Color.parseColor("#999999"))
-        }, lpWrap(2))
+            setTextColor(Color.parseColor("#888888"))
+        }, lpWrap(4))
         wrap.addView(cardAuth, lpWrap(0))
 
         // ---- 拟人化设置卡 ----
@@ -126,11 +131,16 @@ class AutoTaskPanel(
 
         // 状态与刷新
         fun refresh() {
-            authStatus.text = if (GestureService.isEnabled())
-                "状态：● 已开启，可以执行模拟操作"
-            else "状态：○ 未开启（需到系统设置里打开）"
+            val accOn = GestureService.isAccessibilityEnabled(ctx)
+            val overlayOn = PointPicker.canDraw(ctx)
+            authStatus.text = "无障碍：" + (if (accOn) "● 已开启" else "○ 未开启") +
+                              "    悬浮窗：" + (if (overlayOn) "● 已开启" else "○ 未开启")
             authStatus.setTextColor(Color.parseColor(
-                if (GestureService.isEnabled()) "#28A745" else "#DC3545"))
+                if (accOn && overlayOn) "#28A745" else "#DC3545"))
+            btnAccessibility.text = if (accOn) "1. 无障碍已开启（点此可重新进入）"
+                                    else "1. 开启无障碍（模拟点击/长按/滑动）"
+            btnOverlay.text = if (overlayOn) "2. 悬浮窗已开启（点此可重新进入）"
+                              else "2. 开启悬浮窗（屏幕取点用）"
             renderTasks(tasksContainer)
         }
         scroll.setTag(R.id.autotask_refresh, object : Runnable { override fun run() = refresh() })
@@ -145,6 +155,45 @@ class AutoTaskPanel(
     fun refresh(view: View) {
         val tag = view.getTag(R.id.autotask_refresh) as? Runnable ?: return
         tag.run()
+    }
+
+    /**
+     * 直接跳到「喵想联动」无障碍服务的详情开关页。
+     * 用 fragment_args_key 让系统滚动定位到本服务；部分 ROM 不支持该 extra，
+     * 会退回到无障碍总列表——此时用户按提示找「喵想联动 · 自动签到」即可。
+     */
+    private fun openAccessibilitySettings() {
+        val cn = ComponentName(ctx, GestureService::class.java)
+        val key = cn.flattenToString()
+        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+            putExtra(":settings:fragment_args_key", key)
+            putExtra(":settings:show_fragment_args", Bundle().apply {
+                putString(":settings:fragment_args_key", key)
+            })
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            ctx.startActivity(intent)
+        } catch (_: Exception) {
+            toast("打不开设置，请到 系统设置 → 无障碍 → 已下载的服务 里开启")
+        }
+    }
+
+    /** 跳到悬浮窗（显示在其他应用上层）授权页，直接定位到本 App。 */
+    private fun openOverlaySettings() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            try {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${ctx.packageName}")
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                ctx.startActivity(intent)
+            } catch (_: Exception) {
+                toast("打不开设置，请到 系统设置 → 应用 → 喵想联动 → 显示在其他应用上层 里开启")
+            }
+        } else {
+            toast("当前系统版本默认允许悬浮窗，可直接使用取点器")
+        }
     }
 
     private fun renderTasks(container: LinearLayout) {
@@ -296,6 +345,8 @@ class AutoTaskPanel(
         var pkg = existing?.packageName ?: ""
         var label = existing?.appLabel ?: ""
         val steps = (existing?.steps ?: emptyList()).toMutableList()
+        val taskId = existing?.id ?: UUID.randomUUID().toString()
+        lateinit var dlg: AlertDialog
 
         val view = ScrollView(ctx)
         val box = LinearLayout(ctx).apply {
@@ -319,9 +370,9 @@ class AutoTaskPanel(
         box.addView(appBtn, lpWrap(8))
 
         box.addView(TextView(ctx).apply {
-            text = "坐标说明：屏幕左上角 (0,0)，右下角 (1000,1000)，中心 (500,500)。"
+            text = "推荐用下方「🎯 屏幕取点」：拖准星到目标位置点一下即可，不用手输坐标。"
             textSize = 11f
-            setTextColor(Color.parseColor("#999999"))
+            setTextColor(Color.parseColor("#0078D4"))
         }, lpWrap(6))
 
         val stepsBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
@@ -331,7 +382,7 @@ class AutoTaskPanel(
             stepsBox.removeAllViews()
             if (steps.isEmpty()) {
                 stepsBox.addView(TextView(ctx).apply {
-                    text = "还没有步骤。点下面「＋ 添加步骤」。"
+                    text = "还没有步骤。推荐点下面「🎯 屏幕取点」拖准星添加。"
                     textSize = 12f
                     setTextColor(Color.parseColor("#999999"))
                 }, lpWrap(0))
@@ -379,13 +430,49 @@ class AutoTaskPanel(
         renderSteps()
 
         box.addView(Button(ctx).apply {
-            text = "＋ 添加步骤"
+            text = "🎯 屏幕取点（推荐：拖准星点一下，不用输坐标）"
+            isAllCaps = false
+            setTextColor(Color.parseColor("#FFFFFF"))
+            setBackgroundColor(Color.parseColor("#0078D4"))
+            setOnClickListener {
+                if (!PointPicker.canDraw(ctx)) {
+                    toast("请先开启悬浮窗权限，才能用屏幕取点")
+                    PointPicker.requestPermission(ctx)
+                    return@setOnClickListener
+                }
+                // 先把当前编辑框里还没落盘的内容暂存成 task，取点完再带着它们重开
+                val draft = AutoTask(
+                    id = taskId,
+                    name = nameEdit.text.toString().trim(),
+                    packageName = pkg,
+                    appLabel = label,
+                    steps = steps.toList(),
+                    enabled = existing?.enabled ?: true,
+                    dailyEnabled = existing?.dailyEnabled ?: false,
+                    dailyHour = existing?.dailyHour ?: 8,
+                    dailyMinute = existing?.dailyMinute ?: 0,
+                    lastRunDate = existing?.lastRunDate ?: ""
+                )
+                dlg.dismiss()
+                PointPicker.start(activity) { picked ->
+                    if (picked.isNotEmpty()) {
+                        editTask(draft.copy(steps = draft.steps + picked), after)
+                        toast("已取 ${picked.size} 个动作，检查后点保存")
+                    } else {
+                        editTask(draft, after)
+                    }
+                }
+            }
+        }, lpWrap(8))
+
+        box.addView(Button(ctx).apply {
+            text = "＋ 手动添加步骤（输坐标/找文字）"
             isAllCaps = false
             setTextColor(Color.parseColor("#0078D4"))
             setOnClickListener { editStep(null) { steps.add(it); renderSteps() } }
-        }, lpWrap(8))
+        }, lpWrap(4))
 
-        val dlg = AlertDialog.Builder(ctx)
+        dlg = AlertDialog.Builder(ctx)
             .setTitle(if (existing == null) "新建签到任务" else "编辑任务")
             .setView(view)
             .setPositiveButton("保存", null)
