@@ -1,0 +1,34 @@
+# 喵想联动（手机 App）
+
+配套电脑软件「喵想奇记-家用」v1.3.0+ 的安卓 App。让电脑和手机双向通信：
+
+- **电脑 → 手机**：电脑上任务开始/完成/失败/停止，手机弹通知；
+- **手机 → 电脑**：在手机上点任务组，电脑收到指令后自动执行。
+
+两端通过云端信箱中转，家里外面都能用，不需要公网 IP 或同一 WiFi，用配对码隔离。
+
+## 安装
+
+下载 Release 里的 `MiaoXiangLink-v1.0-release.apk` 安装到手机，允许通知权限。
+
+## 快速开始
+
+1. 电脑端「喵想奇记」→ 顶栏「手机联动」→ 生成配对码 → 启用 → 保存；
+2. 手机 App 填同一个配对码 → 保存 → 显示「电脑在线」即成功；
+3. 之后任务完成会通知手机，点 App 里的任务组可远程让电脑执行。
+
+详见 [操作说明.md](操作说明.md)。
+
+## 从源码构建
+
+用 Android Studio 打开本项目（需要 Android SDK 34 + JDK 17+），Run 或执行：
+
+```bash
+./gradlew assembleDebug
+```
+
+产物在 `app/build/outputs/apk/debug/app-debug.apk`。签名 release 可在 `local.properties` 配置 `storeFile` / `storePassword` / `keyAlias` / `keyPassword`。
+
+## 技术说明
+
+纯 Kotlin + OkHttp，直连 WorkBuddy 云服务的 REST 数据面读写一张 `link_messages` 表。云端的网络配置内置在 `CloudApi.kt`。

@@ -1,0 +1,121 @@
+package com.miaoxiang.link
+
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
+
+/**
+ * 云端信箱客户端：与电脑端共用同一张 link_messages 表，纯 HTTP REST 读写。
+ */
+object CloudApi {
+    private const val REST = "https://wbapp-gp4ndbcf8opv7nyrqcfllg.app.workbuddy.host/.cloud/database/rest/v1"
+    private const val KEY = "wbpk_gp4ndbCF8Opv7NYrQcfLlG_2zil329GWxaMLCznWPjTPICBb0JFzsLU"
+    private const val TABLE = "link_messages"
+
+    const val DIR_PC2PHONE = "pc2phone"
+    const val DIR_PHONE2PC = "phone2pc"
+
+    const val MSG_TASK_DONE = "task_done"
+    const val MSG_TASK_FAILED = "task_failed"
+    const val MSG_TASK_START = "task_start"
+    const val MSG_TASK_STOP = "task_stop"
+    const val MSG_COMMAND = "command"
+    const val MSG_ACK = "ack"
+    const val MSG_GROUP_LIST = "group_list"
+    const val MSG_HEARTBEAT = "heartbeat"
+
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .build()
+
+    private val jsonMedia = "application/json; charset=utf-8".toMediaType()
+
+    private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
+
+    private fun request(method: String, path: String, body: String? = null): Result<String> {
+        return try {
+            val builder = Request.Builder()
+                .url(REST + path)
+                .header("x-wb-webapp-access-key", KEY)
+                .header("Accept", "application/json")
+            if (body != null) {
+                builder.header("Content-Type", "application/json")
+                builder.method(method, body.toRequestBody(jsonMedia))
+            } else {
+                builder.method(method, null)
+            }
+            client.newCall(builder.build()).execute().use { resp ->
+                val text = resp.body?.string() ?: ""
+                if (resp.isSuccessful) Result.success(text)
+                else Result.failure(Exception("HTTP ${resp.code}: ${text.take(200)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** 手机下发一条指令（direction=phone2pc）。 */
+    fun sendCommand(pairCode: String, targetType: String, targetName: String,
+                    extra: JSONObject? = null): Result<Boolean> {
+        val payload = JSONObject().apply {
+            put("target_type", targetType)
+            put("target_name", targetName)
+            extra?.let {
+                for (key in it.keys()) put(key, it.get(key))
+            }
+        }
+        val row = JSONObject().apply {
+            put("pair_code", pairCode.trim().uppercase())
+            put("direction", DIR_PHONE2PC)
+            put("msg_type", MSG_COMMAND)
+            put("title", "执行任务")
+            put("content", targetName)
+            put("payload", payload.toString())
+            put("is_read", false)
+        }
+        return request("POST", "/$TABLE", row.toString()).map { true }
+    }
+
+    /** 取电脑发给手机、且未读的消息（升序）。 */
+    fun fetchUnread(pairCode: String, limit: Int = 50): Result<JSONArray> {
+        val q = "pair_code=eq.${enc(pairCode.trim().uppercase())}" +
+                "&direction=eq.$DIR_PC2PHONE" +
+                "&is_read=eq.false" +
+                "&select=*" +
+                "&order=created_at.asc" +
+                "&limit=$limit"
+        return request("GET", "/$TABLE?$q").map { text ->
+            if (text.isBlank()) JSONArray() else JSONArray(text)
+        }
+    }
+
+    /** 取电脑发给手机的最新一类消息（不限已读，倒序）。 */
+    fun fetchLatest(pairCode: String, msgType: String, limit: Int = 5): Result<JSONArray> {
+        val q = "pair_code=eq.${enc(pairCode.trim().uppercase())}" +
+                "&direction=eq.$DIR_PC2PHONE" +
+                "&msg_type=eq.$msgType" +
+                "&select=*" +
+                "&order=created_at.desc" +
+                "&limit=$limit"
+        return request("GET", "/$TABLE?$q").map { text ->
+            if (text.isBlank()) JSONArray() else JSONArray(text)
+        }
+    }
+
+    /** 标记消息已读。 */
+    fun markRead(id: Long): Result<Boolean> {
+        return request("PATCH", "/$TABLE?id=eq.$id", "{\"is_read\":true}").map { true }
+    }
+
+    /** 测试配对码是否有效（能连通云端即可）。 */
+    fun ping(pairCode: String): Result<Boolean> {
+        return fetchUnread(pairCode, 1).map { true }
+    }
+}
