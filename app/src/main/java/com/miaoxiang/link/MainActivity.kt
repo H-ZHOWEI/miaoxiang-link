@@ -24,9 +24,10 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * 喵想联动 - 主界面（v1.2）
+ * 喵想联动 - 主界面（v1.3）
  *  - 三页签：远程执行 / 任务通知 / 设备，通知不再被长脚本列表挤到底部
  *  - 多台已配对设备可切换，所有收发都走「当前设备」的配对码
+ *  - v1.3 新增远程控制：暂停 / 继续 / 停止当前设备正在执行的任务
  */
 class MainActivity : AppCompatActivity() {
 
@@ -144,8 +145,28 @@ class MainActivity : AppCompatActivity() {
             text = "刷新任务组"
             setOnClickListener { loadGroups(showToast = true) }
         }, lpWrap())
+        // 远程控制：暂停 / 继续 / 停止当前设备正在执行的任务
+        addSectionTitle(cardTask, "远程控制（暂停 / 继续 / 停止）")
+        val ctrlRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        ctrlRow.addView(Button(this).apply {
+            text = "⏸ 暂停"
+            isAllCaps = false
+            setOnClickListener { sendActionCmd("pause", "暂停") }
+        }, lpWeight())
+        ctrlRow.addView(Button(this).apply {
+            text = "▶ 继续"
+            isAllCaps = false
+            setOnClickListener { sendActionCmd("resume", "继续") }
+        }, lpWeight())
+        ctrlRow.addView(Button(this).apply {
+            text = "■ 停止"
+            isAllCaps = false
+            setTextColor(Color.parseColor("#C00000"))
+            setOnClickListener { sendActionCmd("stop", "停止") }
+        }, lpWeight())
+        cardTask.addView(ctrlRow, lpWrap())
         cardTask.addView(TextView(this).apply {
-            text = "（电脑正在跑其他任务时会忽略本次指令）"
+            text = "（执行任务：电脑正忙时会忽略；暂停/停止：忙时也立即生效）"
             textSize = 11f
             setTextColor(Color.parseColor("#999999"))
         }, lpWrap())
@@ -536,6 +557,20 @@ class MainActivity : AppCompatActivity() {
                 CloudApi.sendCommand(pair, g.type, g.name).isSuccess
             }
             if (!ok) toast("发送失败，请检查网络")
+        }
+    }
+
+    /** 下发暂停/继续/停止控制指令到当前设备。 */
+    private fun sendActionCmd(action: String, label: String) {
+        val pair = prefs.currentCode
+        if (pair.isEmpty()) { toast("请先添加设备"); return }
+        val device = prefs.currentDeviceName
+        toast("已发送「${label}」到：${device}")
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                CloudApi.sendAction(pair, action).isSuccess
+            }
+            if (!ok) toast("「${label}」发送失败，请检查网络")
         }
     }
 

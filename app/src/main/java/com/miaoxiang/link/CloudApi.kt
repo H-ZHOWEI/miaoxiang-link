@@ -71,12 +71,33 @@ object CloudApi {
                 for (key in it.keys()) put(key, it.get(key))
             }
         }
+        return postCommand(pairCode, "执行任务", targetName, payload)
+    }
+
+    /**
+     * 手机下发一条控制指令（暂停 / 继续 / 停止）。
+     * action 取值见电脑端 CMD_ACTION_PAUSE / RESUME / STOP：pause / resume / stop。
+     * 电脑端 _on_command 解析 action 后绕过「忙时拒绝」，在 UI 线程执行。
+     */
+    fun sendAction(pairCode: String, action: String): Result<Boolean> {
+        val title = when (action) {
+            "pause" -> "暂停任务"
+            "resume" -> "继续任务"
+            "stop" -> "停止任务"
+            else -> "控制指令"
+        }
+        val payload = JSONObject().apply { put("action", action) }
+        return postCommand(pairCode, title, title, payload)
+    }
+
+    private fun postCommand(pairCode: String, title: String, content: String,
+                            payload: JSONObject): Result<Boolean> {
         val row = JSONObject().apply {
             put("pair_code", pairCode.trim().uppercase())
             put("direction", DIR_PHONE2PC)
             put("msg_type", MSG_COMMAND)
-            put("title", "执行任务")
-            put("content", targetName)
+            put("title", title)
+            put("content", content)
             put("payload", payload.toString())
             put("is_read", false)
         }
