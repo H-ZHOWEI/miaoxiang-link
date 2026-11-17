@@ -28,6 +28,10 @@ object CloudApi {
     const val MSG_ACK = "ack"
     const val MSG_GROUP_LIST = "group_list"
     const val MSG_HEARTBEAT = "heartbeat"
+    // 电脑 → 手机：下发「执行某个自动签到任务」的指令（pc2phone 方向）
+    const val MSG_RUN_AUTO_TASK = "run_auto_task"
+    // 手机 → 电脑：手机本地签到任务清单同步（pc2phone 方向，供电脑端下拉选择）
+    const val MSG_AUTO_TASK_LIST = "auto_task_list"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -133,6 +137,59 @@ object CloudApi {
     /** 标记消息已读。 */
     fun markRead(id: Long): Result<Boolean> {
         return request("PATCH", "/$TABLE?id=eq.$id", "{\"is_read\":true}").map { true }
+    }
+
+    /**
+     * 向电脑写一条「手机本地签到任务」的消息（direction=pc2phone）。
+     * 任务清单和执行回执都走这个方向——电脑端 get_status 会用 get_latest 读 pc2phone，
+     * 且手机端自己的 fetchUnread 会按 msg_type 跳过这些类型，不会重复弹通知。
+     */
+    private fun postToPc(pairCode: String, msgType: String, title: String,
+                         content: String, payload: JSONObject): Result<Boolean> {
+        val row = JSONObject().apply {
+            put("pair_code", pairCode.trim().uppercase())
+            put("direction", DIR_PC2PHONE)
+            put("msg_type", msgType)
+            put("title", title)
+            put("content", content)
+            put("payload", payload.toString())
+            put("is_read", false)
+        }
+        return request("POST", "/$TABLE", row.toString()).map { true }
+    }
+
+    /** 手机签到任务执行完成/失败后回执给电脑（电脑端按 task_done 显示在任务通知里）。 */
+    fun reportAutoTaskResult(pairCode: String, taskName: String, success: Boolean,
+                             detail: String): Result<Boolean> {
+        val type = if (success) MSG_TASK_DONE else MSG_TASK_FAILED
+        val payload = JSONObject().apply {
+            put("status", if (success) "done" else "failed")
+            put("label", "手机签到·$taskName")
+            put("source", "phone_auto")
+            put("task_name", taskName)
+        }
+        return postToPc(pairCode, type, "手机签到${if (success) "完成" else "失败"}",
+            "$taskName\n$detail", payload)
+    }
+
+    /** 把手机本地的签到任务清单同步到云端，供电脑端下拉选择下发。 */
+    fun syncAutoTaskList(pairCode: String, tasks: JSONArray): Result<Boolean> {
+        val payload = JSONObject().apply { put("tasks", tasks) }
+        return postToPc(pairCode, MSG_AUTO_TASK_LIST, "手机签到任务清单", "", payload)
+    }
+
+    /** 拉取电脑下发给手机的签到指令（pc2phone 方向，msg_type=run_auto_task）。 */
+    fun fetchAutoCommands(pairCode: String, limit: Int = 30): Result<JSONArray> {
+        val q = "pair_code=eq.${enc(pairCode.trim().uppercase())}" +
+                "&direction=eq.$DIR_PC2PHONE" +
+                "&msg_type=eq.$MSG_RUN_AUTO_TASK" +
+                "&is_read=eq.false" +
+                "&select=*" +
+                "&order=created_at.asc" +
+                "&limit=$limit"
+        return request("GET", "/$TABLE?$q").map { text ->
+            if (text.isBlank()) JSONArray() else JSONArray(text)
+        }
     }
 
     /** 测试配对码是否有效（能连通云端即可）。 */

@@ -12,6 +12,8 @@ class BootReceiver : BroadcastReceiver() {
             if (prefs.devices.isNotEmpty()) {
                 PollingWorker.schedule(context, prefs.pollMinutes)
             }
+            // 开机后恢复每日定时的签到任务
+            ScheduleReceiver.rescheduleAll(context)
         }
     }
 }

@@ -44,9 +44,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pageTask: View
     private lateinit var pageNotify: View
     private lateinit var pageDevice: View
+    private lateinit var pageAuto: View
     private lateinit var tabTask: TextView
     private lateinit var tabNotify: TextView
     private lateinit var tabDevice: TextView
+    private lateinit var tabAuto: TextView
+    private var autoPanel: AutoTaskPanel? = null
 
     // 内容
     private lateinit var taskContainer: LinearLayout
@@ -56,6 +59,9 @@ class MainActivity : AppCompatActivity() {
 
     private var knownGroups = listOf<Group>()
     private var currentTab = 0
+    private var lastAutoCheck = 0L
+    private var lastTaskListSync = 0L
+    private var autoCommandRunning = false
 
     data class Group(val type: String, val name: String, val label: String)
 
@@ -68,6 +74,13 @@ class MainActivity : AppCompatActivity() {
         refreshAll()
         startForegroundPolling()
         PollingWorker.schedule(this, prefs.pollMinutes)
+        // 恢复每日定时签到任务的闹钟
+        ScheduleReceiver.rescheduleAll(this)
+        // 注册执行状态回调，驱动自动签到页的状态显示
+        TaskRunner.onStateChanged = { running, text ->
+            if (currentTab == 3) autoPanel?.refresh(pageAuto)
+            if (running) deviceStatusText.text = text
+        }
     }
 
     // ------------------------------------------------------------------ UI
@@ -115,12 +128,15 @@ class MainActivity : AppCompatActivity() {
         tabTask = tab("① 远程执行")
         tabNotify = tab("② 任务通知")
         tabDevice = tab("③ 设备")
+        tabAuto = tab("④ 自动签到")
         tabTask.setOnClickListener { switchTab(0) }
         tabNotify.setOnClickListener { switchTab(1) }
         tabDevice.setOnClickListener { switchTab(2) }
+        tabAuto.setOnClickListener { switchTab(3) }
         tabBar.addView(tabTask, lpWeight())
         tabBar.addView(tabNotify, lpWeight())
         tabBar.addView(tabDevice, lpWeight())
+        tabBar.addView(tabAuto, lpWeight())
         root.addView(tabBar, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
@@ -234,9 +250,17 @@ class MainActivity : AppCompatActivity() {
         (pageDevice as ScrollView).addView(deviceWrap, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
+        // ---- 页4：自动签到 ----
+        autoPanel = AutoTaskPanel(this, prefs) { task, done ->
+            TaskRunner.run(this, task, TaskRunner.SOURCE_MANUAL) { ok, msg -> done(ok, msg) }
+        }
+        pageAuto = autoPanel!!.build()
+        autoPanel!!.setToastHost(root)
+
         content.addView(pageTask, matchParent())
         content.addView(pageNotify, matchParent())
         content.addView(pageDevice, matchParent())
+        content.addView(pageAuto, matchParent())
         root.addView(content, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -259,11 +283,14 @@ class MainActivity : AppCompatActivity() {
         pageTask.visibility = if (index == 0) View.VISIBLE else View.GONE
         pageNotify.visibility = if (index == 1) View.VISIBLE else View.GONE
         pageDevice.visibility = if (index == 2) View.VISIBLE else View.GONE
+        pageAuto.visibility = if (index == 3) View.VISIBLE else View.GONE
         styleTab(tabTask, index == 0)
         styleTab(tabNotify, index == 1)
         styleTab(tabDevice, index == 2)
+        styleTab(tabAuto, index == 3)
         if (index == 1) refreshNotificationsOnly()
         if (index == 2) renderDevices()
+        if (index == 3) autoPanel?.refresh(pageAuto)
     }
 
     private fun styleTab(t: TextView, active: Boolean) {
@@ -464,7 +491,11 @@ class MainActivity : AppCompatActivity() {
         polling = true
         handler.post(object : Runnable {
             override fun run() {
-                if (prefs.currentCode.isNotEmpty()) refreshAll()
+                if (prefs.currentCode.isNotEmpty()) {
+                    refreshAll()
+                    checkAutoCommands()
+                    syncTaskListIfNeeded()
+                }
                 handler.postDelayed(this, 4000)
             }
         })
@@ -476,6 +507,53 @@ class MainActivity : AppCompatActivity() {
             loadNotificationsInternal()
             loadStatusInternal()
             if (currentTab == 2) renderDevices()
+        }
+    }
+
+    /** 前台快速检查电脑下发的签到指令（每秒最多一次，执行时串行）。 */
+    private fun checkAutoCommands() {
+        val now = System.currentTimeMillis()
+        if (now - lastAutoCheck < 1000 || autoCommandRunning || TaskRunner.isRunning) return
+        lastAutoCheck = now
+        val pair = prefs.currentCode
+        if (pair.isBlank()) return
+        scope.launch {
+            val res = withContext(Dispatchers.IO) { CloudApi.fetchAutoCommands(pair) }
+            val arr = res.getOrElse { return@launch }
+            if (arr.length() == 0) return@launch
+            autoCommandRunning = true
+            try {
+                for (i in 0 until arr.length()) {
+                    val row = arr.optJSONObject(i) ?: continue
+                    CloudApi.markRead(row.optLong("id", 0L))
+                    withContext(Dispatchers.IO) {
+                        PollingWorker.handleAutoCommand(this@MainActivity, pair, row)
+                    }
+                }
+            } finally {
+                autoCommandRunning = false
+            }
+        }
+    }
+
+    /** 每 30 秒把本机签到任务清单同步到云端，供电脑端下拉选择。 */
+    private fun syncTaskListIfNeeded() {
+        val now = System.currentTimeMillis()
+        if (now - lastTaskListSync < 30000) return
+        lastTaskListSync = now
+        val pair = prefs.currentCode
+        if (pair.isBlank()) return
+        val arr = org.json.JSONArray()
+        for (t in prefs.autoTasks) {
+            if (!t.enabled) continue
+            arr.put(org.json.JSONObject().apply {
+                put("id", t.id)
+                put("name", t.name)
+                put("app", t.appLabel)
+            })
+        }
+        scope.launch {
+            withContext(Dispatchers.IO) { CloudApi.syncAutoTaskList(pair, arr) }
         }
     }
 
@@ -669,11 +747,13 @@ class MainActivity : AppCompatActivity() {
         UpdaterKit.autoCheck(this)
         deviceNameText.text = "当前设备：${prefs.currentDeviceName}"
         if (currentTab == 2) renderDevices()
+        if (currentTab == 3) autoPanel?.refresh(pageAuto)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
         scope.cancel()
+        TaskRunner.onStateChanged = null
     }
 }

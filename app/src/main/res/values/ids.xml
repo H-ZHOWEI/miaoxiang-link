@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="autotask_refresh" type="id" />
+    <item name="step_fields" type="id" />
+    <item name="step_delay" type="id" />
+</resources>

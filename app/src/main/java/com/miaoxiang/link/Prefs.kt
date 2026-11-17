@@ -24,6 +24,42 @@ class Prefs(context: Context) {
         private const val K_SEEN = "last_seen_map"
         private const val K_PAIR_OLD = "pair_code"       // 旧版单配对码
         private const val K_SEEN_OLD = "last_seen_id"    // 旧版单游标
+        private const val K_AUTO_TASKS = "auto_tasks_json"
+    }
+
+    // ------------------------------------------------------------ 自动签到任务
+    var autoTasks: List<AutoTask>
+        get() {
+            val raw = sp.getString(K_AUTO_TASKS, "") ?: ""
+            if (raw.isBlank()) return emptyList()
+            val list = mutableListOf<AutoTask>()
+            try {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    arr.optJSONObject(i)?.let { list.add(AutoTask.fromJson(it)) }
+                }
+            } catch (_: Exception) {}
+            return list
+        }
+        set(value) {
+            val arr = JSONArray()
+            for (t in value) arr.put(t.toJson())
+            sp.edit().putString(K_AUTO_TASKS, arr.toString()).apply()
+        }
+
+    fun findAutoTask(id: String): AutoTask? = autoTasks.firstOrNull { it.id == id }
+
+    fun findAutoTaskByName(name: String): AutoTask? =
+        autoTasks.firstOrNull { it.name.equals(name.trim(), ignoreCase = true) }
+
+    fun saveAutoTask(task: AutoTask) {
+        val list = autoTasks.filter { it.id != task.id }.toMutableList()
+        list.add(task)
+        autoTasks = list
+    }
+
+    fun deleteAutoTask(id: String) {
+        autoTasks = autoTasks.filter { it.id != id }
     }
 
     // ------------------------------------------------------------ 设备列表
@@ -155,6 +191,31 @@ class Prefs(context: Context) {
     var pollMinutes: Int
         get() = sp.getInt("poll_minutes", 15)
         set(value) = sp.edit().putInt("poll_minutes", value).apply()
+
+    // ------------------------------------------------------------ 拟人化输入设置
+    var jitterEnabled: Boolean
+        get() = sp.getBoolean("jitter_enabled", true)
+        set(value) = sp.edit().putBoolean("jitter_enabled", value).apply()
+
+    /** 坐标随机抖动幅度（像素），0 表示不抖动。 */
+    var jitterPx: Int
+        get() = if (jitterEnabled) sp.getInt("jitter_px", 6) else 0
+        set(value) = sp.edit().putInt("jitter_px", value).apply()
+
+    /** 步间等待的随机抖动（毫秒）。 */
+    var jitterDelayMs: Int
+        get() = if (jitterEnabled) sp.getInt("jitter_delay_ms", 250) else 0
+        set(value) = sp.edit().putInt("jitter_delay_ms", value).apply()
+
+    /** 按压时长的随机抖动（毫秒）。 */
+    var jitterPressMs: Int
+        get() = if (jitterEnabled) sp.getInt("jitter_press_ms", 40) else 0
+        set(value) = sp.edit().putInt("jitter_press_ms", value).apply()
+
+    /** 滑动拆成几段模拟连续移动，1 表示不分段。 */
+    var jitterMoveSteps: Int
+        get() = if (jitterEnabled) sp.getInt("jitter_move_steps", 4) else 1
+        set(value) = sp.edit().putInt("jitter_move_steps", value).apply()
 
     // 旧接口保留，供未改完的调用方平滑过渡（语义=当前设备）
     @Deprecated("用 currentCode", ReplaceWith("currentCode"))
