@@ -10,7 +10,6 @@ import androidx.core.app.NotificationCompat
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.runBlocking
-import org.json.JSONObject
 
 /**
  * 后台定时轮询：遍历所有「已配对设备」，拉取各自电脑写来的通知，弹系统通知并标记已读。
@@ -37,19 +36,12 @@ class PollingWorker(appContext: Context, params: WorkerParameters) : Worker(appC
                 if (id <= lastId) continue
 
                 val type = row.optString("msg_type", "")
-                // 心跳 / 组清单 / 回执 / 手机自己写的签到清单与回执：不弹通知，只推进 seen
+                // 心跳 / 组清单 / 回执：不弹通知，只推进 seen
                 if (type == CloudApi.MSG_HEARTBEAT || type == CloudApi.MSG_GROUP_LIST ||
-                    type == CloudApi.MSG_ACK || type == CloudApi.MSG_AUTO_TASK_LIST ||
+                    type == CloudApi.MSG_ACK ||
                     type == CloudApi.MSG_TASK_DONE || type == CloudApi.MSG_TASK_FAILED) {
                     lastId = id
                     CloudApi.markRead(id)
-                    continue
-                }
-                // 电脑下发的「执行手机签到任务」指令：直接执行，不弹普通通知
-                if (type == CloudApi.MSG_RUN_AUTO_TASK) {
-                    lastId = id
-                    CloudApi.markRead(id)
-                    handleAutoCommand(applicationContext, pair, row, false)
                     continue
                 }
                 val title = "[${device.name}] ${row.optString("title", "电脑通知")}"
@@ -64,38 +56,6 @@ class PollingWorker(appContext: Context, params: WorkerParameters) : Worker(appC
     }
 
     companion object {
-        /**
-         * 处理电脑下发的签到指令：payload 里带 task_name 或 task_id。
-         * 找到本地任务就执行，完成后回执给电脑并弹结果通知。
-         * [fromBackground] 为 true（WorkManager 后台）时用 runBlocking 执行；
-         * 为 false（前台）时也一样，只是调用方会先标已读避免重复。
-         */
-        fun handleAutoCommand(context: Context, pair: String, row: org.json.JSONObject,
-                              fromBackground: Boolean = false) {
-            val prefs = Prefs(context)
-            val payload = org.json.JSONObject(row.optString("payload", "{}"))
-            val taskName = payload.optString("task_name", "")
-            val taskId = payload.optString("task_id", "")
-            val task = if (taskId.isNotBlank()) prefs.findAutoTask(taskId)
-                       else if (taskName.isNotBlank()) prefs.findAutoTaskByName(taskName)
-                       else null
-            if (task == null) {
-                Notifier.show(context, "[签到] 未找到任务", "指令指定的任务在本机不存在：$taskName", pair.hashCode())
-                CloudApi.reportAutoTaskResult(pair, taskName.ifBlank { taskId }, false, "本机无此任务")
-                return
-            }
-            if (!GestureService.isEnabled()) {
-                Notifier.show(context, "[签到] ${task.name}", "无障碍权限未开启，无法执行", pair.hashCode())
-                CloudApi.reportAutoTaskResult(pair, task.name, false, "无障碍权限未开启")
-                return
-            }
-            val ok = runBlocking {
-                TaskRunner.executeOnce(context.applicationContext, task, TaskRunner.SOURCE_PC)
-            }
-            if (ok.first) Notifier.show(context, "[签到] ${task.name}", ok.second, pair.hashCode())
-            CloudApi.reportAutoTaskResult(pair, task.name, ok.first, ok.second)
-        }
-
         fun schedule(context: Context, minutes: Int) {
             val work = androidx.work.PeriodicWorkRequestBuilder<PollingWorker>(
                 minutes.toLong(), java.util.concurrent.TimeUnit.MINUTES
