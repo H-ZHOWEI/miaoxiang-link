@@ -156,6 +156,15 @@ object TaskRunner {
                     dispatchSwipe(svc, x1, y1, x2, y2, step.durationMs.toLong(), moveSteps)
                 }
                 "click_text" -> withContext(Dispatchers.Main) { svc.clickByText(step.text) }
+                // 系统级动作（回主页面/返回/最近任务等）：无需坐标，直接调官方 global action。
+                // 抖动对系统动作无意义，这里不施加。
+                "global_action" -> withContext(Dispatchers.Main) { svc.globalAction(step.text) }
+                // 按包名打开应用：比"翻页找图标再点"更稳，可在流程任意位置插入。
+                "open_app" -> {
+                    val okOpen = withContext(Dispatchers.Main) { svc.openApp(step.text) }
+                    if (okOpen) delay((1600 + randomNeg(jitterDelay)).coerceAtLeast(500).toLong())
+                    okOpen
+                }
                 "wait" -> true
                 else -> false
             }
@@ -227,6 +236,8 @@ object TaskRunner {
         "long_xy" -> "长按(${step.x},${step.y})"
         "swipe" -> "滑动(${step.x},${step.y})→(${step.x2},${step.y2})"
         "click_text" -> "点击文字「${step.text}」"
+        "global_action" -> "系统动作「${GestureService.gaLabel(step.text)}」"
+        "open_app" -> "打开应用「${step.appLabel.ifBlank { step.text }}」"
         "wait" -> "等待"
         else -> step.type
     }

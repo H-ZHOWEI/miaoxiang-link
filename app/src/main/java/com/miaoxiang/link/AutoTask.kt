@@ -9,14 +9,17 @@ import org.json.JSONObject
  * 这样同一套任务在不同分辨率的手机上位置基本一致。
  */
 data class AutoStep(
-    val type: String = "click_xy",   // click_xy / long_xy / swipe / click_text / wait
+    // click_xy / long_xy / swipe / click_text / wait / global_action / open_app
+    val type: String = "click_xy",
     val x: Int = 500,
     val y: Int = 500,
     val x2: Int = 500,
     val y2: Int = 500,
     val durationMs: Int = 400,       // 长按 / 滑动的持续时间
-    val text: String = "",           // click_text 的目标文字
-    val delayMs: Int = 800           // 本步执行完后的间隔
+    // click_text=目标文字；global_action=动作键(home/back/...)；open_app=应用包名
+    val text: String = "",
+    val delayMs: Int = 800,          // 本步执行完后的间隔
+    val appLabel: String = ""        // open_app 的应用名，仅用于界面展示
 ) {
     fun toJson() = JSONObject().apply {
         put("type", type)
@@ -27,6 +30,7 @@ data class AutoStep(
         put("durationMs", durationMs)
         put("text", text)
         put("delayMs", delayMs)
+        put("appLabel", appLabel)
     }
 
     companion object {
@@ -38,7 +42,8 @@ data class AutoStep(
             y2 = o.optInt("y2", 500),
             durationMs = o.optInt("durationMs", 400),
             text = o.optString("text", ""),
-            delayMs = o.optInt("delayMs", 800)
+            delayMs = o.optInt("delayMs", 800),
+            appLabel = o.optString("appLabel", "")
         )
     }
 }

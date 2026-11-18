@@ -27,6 +27,31 @@ class GestureService : AccessibilityService() {
         var instance: GestureService? = null
             private set
 
+        // ---- 系统级动作键（全面屏手势无法用注入滑动触发，改用官方 global action）----
+        const val GA_HOME = "home"                    // 回主页面（相当于底部上滑）
+        const val GA_BACK = "back"                    // 返回（相当于侧边滑回）
+        const val GA_RECENTS = "recents"              // 最近任务
+        const val GA_NOTIFICATIONS = "notifications"  // 下拉通知栏
+        const val GA_QUICK = "quick_settings"         // 快捷设置
+        const val GA_POWER = "power_dialog"           // 电源菜单
+        const val GA_LOCK = "lock_screen"             // 锁屏（Android 9+）
+        const val GA_SHOT = "screenshot"              // 截图（Android 14+）
+
+        /** 供编辑界面下拉用：键与中文名一一对应。 */
+        val GA_KEYS = arrayOf(
+            GA_HOME, GA_BACK, GA_RECENTS, GA_NOTIFICATIONS,
+            GA_QUICK, GA_POWER, GA_LOCK, GA_SHOT
+        )
+        val GA_LABELS = arrayOf(
+            "回主页面（底部上滑）", "返回（侧边滑回）", "最近任务", "下拉通知栏",
+            "快捷设置", "电源菜单", "锁屏", "系统截图"
+        )
+
+        fun gaLabel(key: String): String {
+            val i = GA_KEYS.indexOf(key)
+            return if (i >= 0) GA_LABELS[i] else key
+        }
+
         /** 判断无障碍服务是否已被系统绑定（权限是否已开启）。 */
         fun isEnabled(): Boolean = instance != null
 
@@ -147,6 +172,37 @@ class GestureService : AccessibilityService() {
             true
         } catch (e: Exception) {
             Log.w(TAG, "打开应用失败: $packageName, ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 系统级动作：回主页面、返回、最近任务、下拉通知等。
+     *
+     * 这些是 Android 的「全面屏手势」——由系统导航栏/手势区域处理，
+     * 通过 dispatchGesture 注入的普通滑动到不了那一层，所以必须用官方的
+     * performGlobalAction。效果与用户在屏幕上做手势完全一致，且跨机型稳定。
+     *
+     * 返回 false 表示该动作在当前系统版本不可用或执行失败。
+     */
+    fun globalAction(key: String): Boolean {
+        val action: Int = when (key) {
+            GA_HOME -> AccessibilityService.GLOBAL_ACTION_HOME
+            GA_BACK -> AccessibilityService.GLOBAL_ACTION_BACK
+            GA_RECENTS -> AccessibilityService.GLOBAL_ACTION_RECENTS
+            GA_NOTIFICATIONS -> AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS
+            GA_QUICK -> AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS
+            GA_POWER -> AccessibilityService.GLOBAL_ACTION_POWER_DIALOG
+            GA_LOCK -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+                AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN else return false
+            GA_SHOT -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+                AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT else return false
+            else -> return false
+        }
+        return try {
+            performGlobalAction(action)
+        } catch (e: Exception) {
+            Log.w(TAG, "系统动作执行失败: $key, ${e.message}")
             false
         }
     }

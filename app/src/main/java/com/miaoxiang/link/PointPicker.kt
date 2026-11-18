@@ -155,41 +155,60 @@ object PointPicker {
 
     private fun addBar() {
         val c = ctx!!
-        val barView = LinearLayout(c).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#E6222833"))
-            setPadding(dp(c, 10), dp(c, 8), dp(c, 10), dp(c, 8))
-        }
 
+        // ---- 建所有控件（先声明、后设监听，避免局部函数/变量声明顺序问题）----
         val spinner = Spinner(c).apply {
             adapter = ArrayAdapter(
                 c, android.R.layout.simple_spinner_item, arrayOf("点击", "长按", "滑动")
             ).apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
         }
-        barView.addView(spinner, wrap())
-
         val recordBtn = Button(c).apply { text = "记录此点"; isAllCaps = false; textSize = 13f }
         val undoBtn = Button(c).apply { text = "撤销"; isAllCaps = false; textSize = 13f }
         val btnRow = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL }
-        btnRow.addView(recordBtn, weight())
-        btnRow.addView(undoBtn, weight())
-        barView.addView(btnRow, wrap())
 
-        val doneBtn = Button(c).apply { text = "完成(0)"; isAllCaps = false; textSize = 13f }
-        barView.addView(doneBtn, wrap())
-
-        val tip = TextView(c).apply {
-            text = "拖准星到目标位置。滑动先「设起点」再「设终点」。按屏幕别处可正常翻页。"
+        val sysHint = TextView(c).apply {
+            text = "系统动作（回主页 / 翻页后继续取点）"
             textSize = 11f
             setTextColor(Color.parseColor("#CCCCCC"))
         }
-        barView.addView(tip, wrap(4))
+        val sysRow = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL }
+        val quickActions = arrayOf(
+            "回主页面" to GestureService.GA_HOME,
+            "返回" to GestureService.GA_BACK,
+            "最近任务" to GestureService.GA_RECENTS
+        )
+        val sysButtons = quickActions.map { (label, _) -> Button(c).apply {
+            text = label; isAllCaps = false; textSize = 11f
+        } }
+
+        // 本机已安装且可启动的 App，供「打开应用」步骤选择（比翻页找图标稳）
+        val pm = c.packageManager
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val apps = pm.queryIntentActivities(launcherIntent, 0)
+            .map { it.activityInfo.applicationInfo to it.loadLabel(pm).toString() }
+            .filter { it.first.enabled }
+            .distinctBy { it.first.packageName }
+            .sortedBy { it.second }
+        val appLabels = mutableListOf("（选择应用）").apply { addAll(apps.map { it.second }) }
+        val appPkgs = apps.map { it.first.packageName }
+        val appSpinner = Spinner(c).apply {
+            adapter = ArrayAdapter(c, android.R.layout.simple_spinner_item, appLabels).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+        }
+        val openAppBtn = Button(c).apply { text = "记录打开此应用"; isAllCaps = false; textSize = 12f }
+
+        val doneBtn = Button(c).apply { text = "完成(0)"; isAllCaps = false; textSize = 13f }
+        val tip = TextView(c).apply {
+            text = "拖准星取点；系统动作直接点按钮。翻页：先滑一下，再回主页找应用。"
+            textSize = 11f
+            setTextColor(Color.parseColor("#CCCCCC"))
+        }
         val summary = TextView(c).apply {
             text = "已添加 0 个动作"
             textSize = 12f
             setTextColor(Color.WHITE)
         }
-        barView.addView(summary, wrap(4))
 
         fun refreshSummary() {
             summary.text = "已添加 ${collected.size} 个动作" +
@@ -200,6 +219,26 @@ object PointPicker {
 
         fun selected() = arrayOf("click_xy", "long_xy", "swipe")[spinner.selectedItemPosition]
 
+        // ---- 按界面顺序加入容器 ----
+        val barView = LinearLayout(c).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#E6222833"))
+            setPadding(dp(c, 10), dp(c, 8), dp(c, 10), dp(c, 8))
+        }
+        barView.addView(spinner, wrap())
+        btnRow.addView(recordBtn, weight())
+        btnRow.addView(undoBtn, weight())
+        barView.addView(btnRow, wrap())
+        barView.addView(sysHint, wrap(6))
+        sysButtons.forEach { sysRow.addView(it, weight()) }
+        barView.addView(sysRow, wrap(2))
+        barView.addView(appSpinner, wrap(4))
+        barView.addView(openAppBtn, wrap(2))
+        barView.addView(doneBtn, wrap())
+        barView.addView(tip, wrap(4))
+        barView.addView(summary, wrap(4))
+
+        // ---- 监听 ----
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
                 swipeStart = null
@@ -207,7 +246,6 @@ object PointPicker {
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
-
         recordBtn.setOnClickListener {
             val (x, y) = perMille()
             when (selected()) {
@@ -249,14 +287,36 @@ object PointPicker {
             }
             refreshSummary()
         }
+        sysButtons.forEachIndexed { i, btn ->
+            btn.setOnClickListener {
+                collected.add(AutoStep(
+                    type = "global_action", text = quickActions[i].second, delayMs = 1200
+                ))
+                tip.text = "已添加「${quickActions[i].first}」。系统动作由系统执行，无需取点。"
+                refreshSummary()
+            }
+        }
+        openAppBtn.setOnClickListener {
+            val pos = appSpinner.selectedItemPosition
+            if (pos <= 0 || pos > appPkgs.size) {
+                tip.text = "先在上方下拉选一个应用，再点「记录打开此应用」。"
+                return@setOnClickListener
+            }
+            collected.add(AutoStep(
+                type = "open_app", text = appPkgs[pos - 1],
+                appLabel = appLabels[pos], delayMs = 1600
+            ))
+            tip.text = "已添加打开「${appLabels[pos]}」。"
+            refreshSummary()
+        }
         doneBtn.setOnClickListener { stop() }
 
         val lp = WindowManager.LayoutParams(
-            dp(c, 228), WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(c, 250), WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType, flags(), PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = c.resources.displayMetrics.widthPixels - dp(c, 236)
+            x = c.resources.displayMetrics.widthPixels - dp(c, 258)
             y = dp(c, 56)
         }
         bar = barView
@@ -268,6 +328,8 @@ object PointPicker {
         "click_xy" -> "点击(${s.x},${s.y})"
         "long_xy" -> "长按(${s.x},${s.y})"
         "swipe" -> "滑动(${s.x},${s.y})→(${s.x2},${s.y2})"
+        "global_action" -> GestureService.gaLabel(s.text)
+        "open_app" -> "打开 ${s.appLabel.ifBlank { s.text }}"
         else -> s.type
     }
 

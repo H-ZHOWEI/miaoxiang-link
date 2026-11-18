@@ -55,7 +55,8 @@ class AutoTaskPanel(
         }
         cardAuth.addView(btnOverlay, lpWrap(4))
         cardAuth.addView(TextView(ctx).apply {
-            text = "无障碍：在无障碍列表里找「喵想联动 · 自动签到」，点开后打开开关。\n" +
+            text = "支持：点击 / 长按 / 滑动翻页 / 点击文字 / 回主页面等系统手势 / 打开应用。\n" +
+                   "权限：在无障碍列表里找「喵想联动 · 自动签到」，点开后打开开关。\n" +
                    "悬浮窗：允许「显示在其他应用上层」，取点时准星才能盖在目标 App 上。\n" +
                    "两项都是手机系统出于安全考虑要求手动授权的，本 App 不会读取你的屏幕内容。"
             textSize = 11f
@@ -201,7 +202,7 @@ class AutoTaskPanel(
         val tasks = prefs.autoTasks
         if (tasks.isEmpty()) {
             container.addView(TextView(ctx).apply {
-                text = "还没有任务。点下方「新建签到任务」，例如：打开某 App → 等 2 秒 → 点「签到」按钮。"
+                text = "还没有任务。新建后可用「屏幕取点」拖准星添加点击/滑动，或加「回主页面→翻页→点应用」这套流程。"
                 textSize = 12f
                 setTextColor(Color.parseColor("#999999"))
             }, lpWrap(2))
@@ -507,9 +508,19 @@ class AutoTaskPanel(
 
     /** 单个步骤编辑：类型 + 对应参数。新建时回调传出，编辑时原地修改。 */
     private fun editStep(existing: AutoStep?, done: (AutoStep) -> Unit) {
-        val types = arrayOf("点击坐标", "长按坐标", "滑动/翻页", "点击文字", "等待")
-        val typeKeys = arrayOf("click_xy", "long_xy", "swipe", "click_text", "wait")
+        val types = arrayOf(
+            "点击坐标", "长按坐标", "滑动/翻页", "点击文字", "等待",
+            "系统动作（回主页/返回等）", "打开应用（按包名）"
+        )
+        val typeKeys = arrayOf(
+            "click_xy", "long_xy", "swipe", "click_text", "wait",
+            "global_action", "open_app"
+        )
         val startIdx = typeKeys.indexOf(existing?.type ?: "click_xy").coerceAtLeast(0)
+        // 新类型的参数存在这里，确定按钮再取（避免视图 tag 类型混乱）
+        var pickedAction = existing?.text?.takeIf { GestureService.GA_KEYS.contains(it) } ?: GestureService.GA_HOME
+        var pickedPkg = existing?.takeIf { it.type == "open_app" }?.text ?: ""
+        var pickedAppLabel = existing?.takeIf { it.type == "open_app" }?.appLabel ?: ""
 
         val view = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
@@ -580,6 +591,45 @@ class AutoTaskPanel(
                     fields.addView(txt, lpWrap(0))
                     fields.setTag(R.id.step_fields, emptyArray<EditText>())
                 }
+                "global_action" -> {
+                    val gaSpinner = Spinner(ctx).apply {
+                        adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_item, GestureService.GA_LABELS).apply {
+                            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+                        }
+                        setSelection(GestureService.GA_KEYS.indexOf(pickedAction).coerceAtLeast(0))
+                    }
+                    gaSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                        override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                            pickedAction = GestureService.GA_KEYS[pos]
+                        }
+                        override fun onNothingSelected(p: AdapterView<*>?) {}
+                    }
+                    fields.addView(TextView(ctx).apply {
+                        text = "选择系统动作（由系统执行，无需坐标）"
+                        textSize = 12f; setTextColor(Color.parseColor("#666666"))
+                    }, lpWrap(0))
+                    fields.addView(gaSpinner, lpWrap(2))
+                    fields.addView(TextView(ctx).apply {
+                        text = "「回主页面」相当于从底部上滑回桌面；之后可用「滑动/翻页」找应用，再点图标。"
+                        textSize = 11f; setTextColor(Color.parseColor("#999999"))
+                    }, lpWrap(2))
+                    fields.setTag(R.id.step_fields, emptyArray<EditText>())
+                }
+                "open_app" -> {
+                    val appBtn = Button(ctx).apply {
+                        text = "选择应用：" + (pickedAppLabel.ifBlank { "（点击选择）" })
+                        isAllCaps = false
+                    }
+                    appBtn.setOnClickListener {
+                        pickApp { p, l -> pickedPkg = p; pickedAppLabel = l; appBtn.text = "选择应用：$l" }
+                    }
+                    fields.addView(appBtn, lpWrap(0))
+                    fields.addView(TextView(ctx).apply {
+                        text = "按包名直接打开，比翻页找图标更稳。可在「回主页面」之后插入这一步。"
+                        textSize = 11f; setTextColor(Color.parseColor("#999999"))
+                    }, lpWrap(2))
+                    fields.setTag(R.id.step_fields, emptyArray<EditText>())
+                }
             }
             val delay = eEdit("本步后等待(ms)", "${existing?.delayMs ?: 800}")
             fields.addView(delay, lpWrap(8))
@@ -606,6 +656,11 @@ class AutoTaskPanel(
                     "swipe" -> AutoStep(type, x = num(arr[0]), y = num(arr[1]), x2 = num(arr[2]), y2 = num(arr[3]), durationMs = num(arr[4]), delayMs = delay)
                     "click_text" -> AutoStep(type, text = arr[0].text.toString().trim(), delayMs = delay)
                     "wait" -> AutoStep(type, delayMs = delay)
+                    "global_action" -> AutoStep(type, text = pickedAction, delayMs = if (delay == 800) 1200 else delay)
+                    "open_app" -> {
+                        if (pickedPkg.isBlank()) { toast("请先选择要打开的应用"); return@setPositiveButton }
+                        AutoStep(type, text = pickedPkg, appLabel = pickedAppLabel, delayMs = if (delay == 800) 1600 else delay)
+                    }
                     else -> AutoStep("wait", delayMs = delay)
                 }
                 done(step)
@@ -639,6 +694,8 @@ class AutoTaskPanel(
         "long_xy" -> "长按 (${s.x}, ${s.y}) ${s.durationMs}ms"
         "swipe" -> "滑动 (${s.x},${s.y}) → (${s.x2},${s.y2}) ${s.durationMs}ms"
         "click_text" -> "点击文字「${s.text}」"
+        "global_action" -> "系统动作：${GestureService.gaLabel(s.text)}"
+        "open_app" -> "打开应用「${s.appLabel.ifBlank { s.text }}」"
         "wait" -> "等待 ${s.delayMs}ms"
         else -> s.type
     }
