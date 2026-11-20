@@ -156,6 +156,20 @@ class Prefs(context: Context) {
         get() = sp.getInt("poll_minutes", 15)
         set(value) = sp.edit().putInt("poll_minutes", value).apply()
 
+    /**
+     * 前台「按需刷新」模式（v1.8 新增，默认开启以节省资源点）：
+     * 开启后 App 前台不再每几秒自动轮询云端，只有用户点「刷新数据」按钮时才拉取一次。
+     * 关闭后恢复自动轮询（间隔见 autoRefreshSeconds）。
+     */
+    var onDemandMode: Boolean
+        get() = sp.getBoolean("on_demand_mode", true)
+        set(value) = sp.edit().putBoolean("on_demand_mode", value).apply()
+
+    /** 自动轮询模式下的刷新间隔（秒），默认 15。 */
+    var autoRefreshSeconds: Int
+        get() = sp.getInt("auto_refresh_seconds", 15)
+        set(value) = sp.edit().putInt("auto_refresh_seconds", value).apply()
+
     // 旧接口保留，供未改完的调用方平滑过渡（语义=当前设备）
     @Deprecated("用 currentCode", ReplaceWith("currentCode"))
     var pairCode: String

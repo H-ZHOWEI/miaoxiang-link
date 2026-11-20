@@ -128,6 +128,24 @@ object CloudApi {
         }
     }
 
+    /**
+     * v1.8：一次 GET 拉取前台需要的三类低频消息（任务组 / 完成 / 失败），
+     * 用 PostgREST 的 `msg_type=in.(...)` 合并，替代原来 3 次独立请求。
+     * 心跳单独低频拉取并缓存（心跳每分钟都有，混在一起会挤掉通知）。
+     */
+    fun fetchDashboard(pairCode: String, limit: Int = 30): Result<JSONArray> {
+        val types = "$MSG_GROUP_LIST,$MSG_TASK_DONE,$MSG_TASK_FAILED"
+        val q = "pair_code=eq.${enc(pairCode.trim().uppercase())}" +
+                "&direction=eq.$DIR_PC2PHONE" +
+                "&msg_type=in.($types)" +
+                "&select=*" +
+                "&order=created_at.desc" +
+                "&limit=$limit"
+        return request("GET", "/$TABLE?$q").map { text ->
+            if (text.isBlank()) JSONArray() else JSONArray(text)
+        }
+    }
+
     /** 标记消息已读。 */
     fun markRead(id: Long): Result<Boolean> {
         return request("PATCH", "/$TABLE?id=eq.$id", "{\"is_read\":true}").map { true }

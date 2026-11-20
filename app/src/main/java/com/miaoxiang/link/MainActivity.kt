@@ -53,9 +53,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var notifyContainer: LinearLayout
     private lateinit var deviceContainer: LinearLayout
     private lateinit var notifySwitch: Switch
+    private lateinit var onDemandSwitch: Switch
+    private lateinit var refreshHintText: TextView
 
     private var knownGroups = listOf<Group>()
     private var currentTab = 0
+
+    // v1.8：一次拉取的原始数据做内存缓存，切页签/重复渲染不再联网
+    private var cachedRows = JSONArray()
+    private var lastRefreshAt = 0L
+    private var lastHeartbeatFetch = 0L   // 心跳变化慢，最多每 30 秒拉一次
 
     data class Group(val type: String, val name: String, val label: String)
 
@@ -65,8 +72,14 @@ class MainActivity : AppCompatActivity() {
         askNotificationPermission()
         buildUi()
         switchTab(0)
-        refreshAll()
-        startForegroundPolling()
+        updateRefreshHint()
+        if (prefs.onDemandMode) {
+            // 按需模式：不主动联网，页面显示提示，等用户点「刷新数据」
+            renderEmptyStates()
+        } else {
+            refreshAll()
+            startForegroundPolling()
+        }
         PollingWorker.schedule(this, prefs.pollMinutes)
     }
 
@@ -96,12 +109,26 @@ class MainActivity : AppCompatActivity() {
             text = "当前设备：${prefs.currentDeviceName}"
         }
         header.addView(deviceNameText, lpWrap(2))
+        // 状态行 + 刷新按钮（v1.8 按需模式的核心入口：不按按钮就不联网）
+        val statusRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         deviceStatusText = TextView(this).apply {
             textSize = 12f
             setTextColor(Color.parseColor("#999999"))
             text = "状态：检测中…"
         }
-        header.addView(deviceStatusText, lpWrap(0))
+        statusRow.addView(deviceStatusText, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        statusRow.addView(Button(this).apply {
+            text = "↻ 刷新数据"
+            isAllCaps = false
+            textSize = 12f
+            setOnClickListener { manualRefresh() }
+        }, LinearLayout.LayoutParams(dp(104), LinearLayout.LayoutParams.WRAP_CONTENT))
+        header.addView(statusRow, lpWrap(0))
+        refreshHintText = TextView(this).apply {
+            textSize = 11f
+        }
+        header.addView(refreshHintText, lpWrap(2))
         root.addView(header, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
@@ -219,6 +246,23 @@ class MainActivity : AppCompatActivity() {
             }
         }
         cardSetting.addView(notifySwitch, lpWrap())
+        // v1.8：按需刷新开关（默认开）。开启后前台不自动联网，只有点顶部「刷新数据」才消耗资源点
+        onDemandSwitch = Switch(this).apply {
+            text = "按需刷新（省资源点）"
+            isChecked = prefs.onDemandMode
+            setOnCheckedChangeListener { _, on ->
+                prefs.onDemandMode = on
+                updateRefreshHint()
+                if (on) {
+                    stopForegroundPolling()
+                    toast("已开启按需刷新：只有点顶部「刷新数据」才会联网")
+                } else {
+                    startForegroundPolling()
+                    toast("已关闭按需刷新：每 ${prefs.autoRefreshSeconds} 秒自动刷新")
+                }
+            }
+        }
+        cardSetting.addView(onDemandSwitch, lpWrap())
         cardSetting.addView(Button(this).apply {
             text = "检查更新"
             setOnClickListener { UpdaterKit.checkManually(this@MainActivity) }
@@ -226,7 +270,8 @@ class MainActivity : AppCompatActivity() {
         cardSetting.addView(TextView(this).apply {
             text = "提示：在每台电脑上各自开启「手机联动」并生成配对码，再逐个添加到这里。\n" +
                    "在本页点击设备卡片即可切换当前控制的电脑；只有已配对过的设备能切换。\n" +
-                   "App 前台时实时刷新；退到后台约每 ${prefs.pollMinutes} 分钟检查一次通知。"
+                   "按需刷新默认开启：App 不自动联网、不消耗资源点，点顶部「↻ 刷新数据」按钮才拉取一次。\n" +
+                   "关闭后可改为自动刷新（每 ${prefs.autoRefreshSeconds} 秒）；后台通知仍按每 ${prefs.pollMinutes} 分钟检查。"
             textSize = 11f
             setTextColor(Color.parseColor("#999999"))
         }, lpWrap())
@@ -459,48 +504,139 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ------------------------------------------------------------------ 数据加载
+    /** 自动轮询仅在「按需模式」关闭时启用，间隔可调（默认 15 秒，远低于原来的 4 秒）。 */
     private fun startForegroundPolling() {
-        if (polling) return
+        if (polling || prefs.onDemandMode) return
         polling = true
         handler.post(object : Runnable {
             override fun run() {
-                if (prefs.currentCode.isNotEmpty()) {
+                if (!prefs.onDemandMode && prefs.currentCode.isNotEmpty()) {
                     refreshAll()
                 }
-                handler.postDelayed(this, 4000)
+                handler.postDelayed(this, prefs.autoRefreshSeconds.coerceIn(5, 300) * 1000L)
             }
         })
     }
 
-    private fun refreshAll() {
+    private fun stopForegroundPolling() {
+        polling = false
+        handler.removeCallbacksAndMessages(null)
+    }
+
+    /** 顶部状态栏提示文案：告诉用户当前是否会自动联网。 */
+    private fun updateRefreshHint() {
+        refreshHintText.text = if (prefs.onDemandMode) {
+            "按需模式：不自动联网 · 点右上「↻ 刷新数据」才会消耗资源点"
+        } else {
+            "自动模式：每 ${prefs.autoRefreshSeconds} 秒刷新（会持续消耗资源点）"
+        }
+        refreshHintText.setTextColor(Color.parseColor(
+            if (prefs.onDemandMode) "#28A745" else "#C00000"))
+    }
+
+    /** 用户点「刷新数据」：主动拉取一次云端并刷新全部页面。 */
+    private fun manualRefresh() {
+        if (prefs.currentCode.isEmpty()) {
+            toast("请先在「③ 设备」添加已配对的电脑")
+            return
+        }
+        toast("正在刷新…")
+        refreshAll(showToast = true)
+    }
+
+    /**
+     * v1.8 核心：一次合并请求拉全部数据（替代原来 4 次 GET），结果存入内存缓存，
+     * 各页面从缓存渲染。切页签、重复进入都不再联网。
+     */
+    private fun refreshAll(showToast: Boolean = false) {
         scope.launch {
-            loadGroupsInternal()
-            loadNotificationsInternal()
-            loadStatusInternal()
-            if (currentTab == 2) renderDevices()
+            val pair = prefs.currentCode
+            if (pair.isEmpty()) return@launch
+            // 一次合并请求：任务组 + 完成 + 失败
+            val res = withContext(Dispatchers.IO) { CloudApi.fetchDashboard(pair) }
+            val ok = res.isSuccess
+            if (ok) {
+                val rows = res.getOrNull() ?: JSONArray()
+                // 心跳单独拉，最多每 30 秒一次，合并进同一缓存供状态显示
+                val now = System.currentTimeMillis()
+                if (now - lastHeartbeatFetch > 30_000L) {
+                    val hb = withContext(Dispatchers.IO) {
+                        CloudApi.fetchLatest(pair, CloudApi.MSG_HEARTBEAT, 1)
+                    }
+                    if (hb.isSuccess) {
+                        hb.getOrNull()?.let { rows.put(it) }
+                        lastHeartbeatFetch = now
+                    }
+                } else {
+                    // 复用上次心跳行
+                    for (i in 0 until cachedRows.length()) {
+                        val row = cachedRows.optJSONObject(i) ?: continue
+                        if (row.optString("msg_type", "") == CloudApi.MSG_HEARTBEAT) rows.put(row)
+                    }
+                }
+                cachedRows = rows
+                lastRefreshAt = now
+                applyCachedRows()
+            }
+            if (showToast) {
+                toast(if (ok) "已刷新（${prefs.currentDeviceName}）" else "刷新失败，请检查连接")
+            }
         }
     }
 
+    /** 用内存缓存渲染各页面（不联网）。 */
+    private fun applyCachedRows() {
+        renderGroupsFromCache()
+        renderNotificationsFromCache()
+        renderStatusFromCache()
+        if (currentTab == 2) renderDevices()
+    }
+
+    /** 按需模式首次进入 / 无数据时，显示空状态，不联网。 */
+    private fun renderEmptyStates() {
+        if (knownGroups.isEmpty()) renderGroups(emptyList())
+        if (notifyContainer.childCount == 0) {
+            notifyContainer.removeAllViews()
+            notifyContainer.addView(TextView(this).apply {
+                text = "按需模式：点顶部「↻ 刷新数据」后显示通知"
+                textSize = 12f
+                setTextColor(Color.parseColor("#999999"))
+            }, lpWrap())
+        }
+        deviceStatusText.text = "状态：点「↻ 刷新数据」检测在线状态"
+        deviceStatusText.setTextColor(Color.parseColor("#999999"))
+    }
+
+    /** 仅从缓存渲染通知（切到通知页用，不联网）。 */
     private fun refreshNotificationsOnly() {
-        scope.launch { loadNotificationsInternal() }
+        renderNotificationsFromCache()
     }
 
     private fun loadGroups(showToast: Boolean) {
-        scope.launch {
-            val ok = loadGroupsInternal()
-            if (showToast) toast(if (ok) "任务组已刷新（${prefs.currentDeviceName}）" else "刷新失败，请检查连接")
-        }
+        // 任务组按钮是显式操作，走一次完整刷新
+        refreshAll(showToast = showToast)
     }
 
-    private suspend fun loadGroupsInternal(): Boolean {
-        val pair = prefs.currentCode
-        if (pair.isEmpty()) return false
-        val res = withContext(Dispatchers.IO) { CloudApi.fetchLatest(pair, CloudApi.MSG_GROUP_LIST, 1) }
-        val arr = res.getOrElse { return false }
-        if (arr.length() == 0) return true
-        val payload = arr.getJSONObject(0).optString("payload", "{}")
+    /** 从缓存的合并结果里筛出某一 msg_type 的行。 */
+    private fun rowsOfType(type: String, limit: Int): List<JSONObject> {
+        val out = mutableListOf<JSONObject>()
+        for (i in 0 until cachedRows.length()) {
+            val row = cachedRows.optJSONObject(i) ?: continue
+            if (row.optString("msg_type", "") == type) {
+                out.add(row)
+                if (out.size >= limit) break
+            }
+        }
+        return out
+    }
+
+    private fun renderGroupsFromCache() {
+        val groupRows = rowsOfType(CloudApi.MSG_GROUP_LIST, 1)
         var groups = JSONArray()
-        try { groups = JSONObject(payload).optJSONArray("groups") ?: JSONArray() } catch (_: Exception) {}
+        if (groupRows.isNotEmpty()) {
+            val payload = groupRows[0].optString("payload", "{}")
+            try { groups = JSONObject(payload).optJSONArray("groups") ?: JSONArray() } catch (_: Exception) {}
+        }
         val list = mutableListOf<Group>()
         for (i in 0 until groups.length()) {
             val g = groups.optJSONObject(i) ?: continue
@@ -514,7 +650,6 @@ class MainActivity : AppCompatActivity() {
             knownGroups = list
             renderGroups(list)
         }
-        return true
     }
 
     private fun renderGroups(groups: List<Group>) {
@@ -576,22 +711,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun loadNotificationsInternal() {
-        val pair = prefs.currentCode
-        if (pair.isEmpty()) return
-        val res = withContext(Dispatchers.IO) { CloudApi.fetchLatest(pair, CloudApi.MSG_TASK_DONE, 6) }
-        val done = res.getOrElse { JSONArray() }
-        val res2 = withContext(Dispatchers.IO) { CloudApi.fetchLatest(pair, CloudApi.MSG_TASK_FAILED, 6) }
-        val failed = res2.getOrElse { JSONArray() }
+    private fun renderNotificationsFromCache() {
         val combined = mutableListOf<JSONObject>()
-        for (i in 0 until done.length()) done.optJSONObject(i)?.let { combined.add(it) }
-        for (i in 0 until failed.length()) failed.optJSONObject(i)?.let { combined.add(it) }
+        combined.addAll(rowsOfType(CloudApi.MSG_TASK_DONE, 6))
+        combined.addAll(rowsOfType(CloudApi.MSG_TASK_FAILED, 6))
         combined.sortByDescending { it.optString("created_at", "") }
 
         notifyContainer.removeAllViews()
         if (combined.isEmpty()) {
             notifyContainer.addView(TextView(this).apply {
-                text = "「${prefs.currentDeviceName}」暂无通知记录"
+                text = if (cachedRows.length() == 0 && prefs.onDemandMode)
+                    "按需模式：点顶部「↻ 刷新数据」后显示通知"
+                else "「${prefs.currentDeviceName}」暂无通知记录"
                 textSize = 12f
                 setTextColor(Color.parseColor("#999999"))
             }, lpWrap())
@@ -623,21 +754,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun loadStatusInternal() {
+    private fun renderStatusFromCache() {
         val pair = prefs.currentCode
         if (pair.isEmpty()) {
             deviceStatusText.text = "状态：请先添加设备"
             deviceStatusText.setTextColor(Color.parseColor("#DC3545"))
             return
         }
-        val res = withContext(Dispatchers.IO) { CloudApi.fetchLatest(pair, CloudApi.MSG_HEARTBEAT, 1) }
-        val arr = res.getOrElse { null }
-        if (arr == null || arr.length() == 0) {
-            deviceStatusText.text = "状态：未发现「${prefs.currentDeviceName}」（请开启该电脑的联动）"
+        val hb = rowsOfType(CloudApi.MSG_HEARTBEAT, 1)
+        if (hb.isEmpty()) {
+            deviceStatusText.text = if (cachedRows.length() == 0 && prefs.onDemandMode)
+                "状态：点「↻ 刷新数据」检测在线状态"
+            else "状态：未发现「${prefs.currentDeviceName}」（请开启该电脑的联动）"
             deviceStatusText.setTextColor(Color.parseColor("#DC3545"))
             return
         }
-        val created = arr.getJSONObject(0).optString("created_at", "")
+        val created = hb[0].optString("created_at", "")
         val minutesAgo = try {
             val t = java.time.OffsetDateTime.parse(created).toInstant().toEpochMilli()
             ((System.currentTimeMillis() - t) / 60000).toInt()
